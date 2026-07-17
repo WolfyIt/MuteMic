@@ -1,0 +1,9 @@
+/// MainWindow.idl — Ventana de configuración
+namespace MuteMic
+{
+    [default_interface]
+    runtimeclass MainWindow : Microsoft.UI.Xaml.Window
+    {
+        MainWindow();
+    }
+}

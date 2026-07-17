@@ -1,0 +1,71 @@
+<p align="center">
+  <img src="app-icon-preview.png" width="96" alt="MuteMic icon">
+</p>
+
+<h1 align="center">MuteMic</h1>
+
+<p align="center">
+  A native Windows mic-mute utility that stays out of your way — global shortcuts from <em>any</em> device,
+  a volume-reactive neon tray icon, game-safe visual cues, and a real Liquid Glass UI.
+  <br>WinUI 3 · C++/WinRT · zero Electron, zero background bloat.
+</p>
+
+---
+
+## Features
+
+**Mute from anything.** Shortcut *cards* let you bind as many inputs as you want, each with its own name and mode: keyboard keys or combos (including macro keys like NZXT / Razer keys mapped to F13–F24), mouse buttons (M3/M4/M5), and XInput controller buttons. Cards auto-detect the device type on capture, show a presence dot for controllers, and can be added, renamed, tested, or removed on the fly.
+
+**Three trigger modes per card** — toggle, push-to-talk, and push-to-mute (with debouncing so macro keys that emit instant down+up pairs still hold correctly). The keyboard toggle path also registers a real `RegisterHotKey`, so it keeps working over elevated apps like Task Manager.
+
+**Volume-reactive tray icon.** Five neon states rendered at runtime with GDI+ (gray disabled, green idle, green speaking with level-reactive glow, red muted, red talking-while-muted), supersampled and DPI-aware. Rendering only happens when the level crosses a visual bucket — idle means zero redraws.
+
+**Win11-style tray flyout.** A native-looking acrylic flyout (mute/unmute, device switcher, open, quit) built to match the system network flyout, with correct light/dark theming.
+
+**Visual cues that don't cost you frames.** Optional on-screen feedback when muting/unmuting: full edge ring, corner brackets, or an iPhone-island style notch (any screen edge). Cues are rendered through DirectComposition swapchains on `WS_EX_NOREDIRECTIONBITMAP` windows — no redirection surface, MPO-eligible, animation vsynced to your monitor's real refresh rate. Your game keeps its independent-flip fast path.
+
+**Sound cues.** Drop your own WAVs into `Sounds/mute` and `Sounds/unmute`, pick them in Settings with a volume slider. Playback is flagged as a sound effect, so it never hijacks the media overlay.
+
+**Liquid Glass.** A real refraction shader (HLSL D2D custom effect over live screen capture via Win2D), not just acrylic — with a Frosting toggle and Light/Night themes. Screen-share friendly: the lens freezes to a snapshot and the window excludes itself from capture.
+
+**Automation-ready CLI.** Perfect for Stream Deck / AutoHotkey / scripts — no open ports, no servers:
+
+```
+MuteMic.exe --toggle | --mute | --unmute | --show
+```
+
+If MuteMic is already running, the verb is forwarded to the live instance in milliseconds.
+
+**Polite by design.** Restores your mic to its pre-launch state on exit (including system shutdown), starts minimized to tray if you want, second launch just opens the existing window, and it answers shutdown queries immediately so it never slows your PC down.
+
+## Screenshots
+
+<!-- TODO: main window · settings · tray flyout · visual cues -->
+
+## Build
+
+- Visual Studio 2022 (v143) + Windows SDK 10.0.26100
+- NuGet restores Windows App SDK 1.6, C++/WinRT, WIL and Win2D automatically
+- Runtime to execute: `winget install Microsoft.WindowsAppRuntime.1.6`
+
+```
+msbuild MuteMic.sln /p:Configuration=Release /p:Platform=x64 /restore
+```
+
+> Note: this is an *unpackaged* WinUI 3 app (no MSIX). The XAML compiler does not
+> emit `*.xaml.g.h` in this mode, so the ones in `Generated Files/` at the repo
+> root are maintained by hand — see `.github/copilot-instructions.md` for the
+> full build architecture and known-failure recipes.
+
+Windows 11 is the target; Windows 10 2004+ works with graceful degradation (no rounded corners / acrylic).
+
+## Architecture notes
+
+- `Core/` is pure Win32/COM: Core Audio (`IAudioEndpointVolume`, `IAudioMeterInformation`), low-level keyboard/mouse hooks, XInput polling, tray, GDI+ icon rendering.
+- `Core/LiquidGlass.hlsl` + `LiquidGlassBackdrop` implement the refraction backdrop (Windows.Graphics.Capture → Win2D `PixelShaderEffect` → `CanvasControl`).
+- `Core/VisualCue.cpp` implements the anti-FPS-drop overlay architecture (DirectComposition presentation, per-region windows, compositor-clock pacing).
+- `legacy-win32/` contains the original pure-Win32 prototype this project grew out of.
+
+## License
+
+[MIT](LICENSE) © Joel Santoro (WolfyIt)

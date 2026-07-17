@@ -1,0 +1,9 @@
+{
+    "cmake.ignoreCMakeListsMissing": true,
+    "chat.tools.terminal.autoApprove": {
+        "/^cmd /c \"call `\"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Community\\\\VC\\\\Auxiliary\\\\Build\\\\vcvarsall\\.bat`\" x64 && msbuild `\"C:\\\\Users\\\\DarkW\\\\Desktop\\\\MuteMicWindows\\\\MuteMic\\.vcxproj`\" /t:Build /p:Configuration=Debug /p:Platform=x64 2>&1\" \\| Select-String -Pattern \": error \" \\| Select-Object -First 5$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}

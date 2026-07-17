@@ -1,0 +1,59 @@
+<Project>
+  <!--
+    WHY: Mirrors the working NUCSoftwareStudio Directory.Build.props exactly.
+    Provides NuGet packages and WinMD references for the CppWinRT/WinUI pipeline.
+
+    CRITICAL:
+    - TargetFrameworkMoniker=native,Version=v0.0 → native C++, NOT UAP.
+    - AssetTargetFallback=native → NuGet fallback for native packages.
+    - SDK.BuildTools → provides platform WinMDs.
+  -->
+
+  <PropertyGroup Condition="'$(MSBuildProjectName)' == 'MuteMic'">
+    <WindowsPackageType>None</WindowsPackageType>
+    <AssetTargetFallback>native</AssetTargetFallback>
+    <TargetFrameworkMoniker>native,Version=v0.0</TargetFrameworkMoniker>
+    <RootNamespace>MuteMic</RootNamespace>
+  </PropertyGroup>
+
+  <!-- ALL NuGet PackageReferences go here, NOT in the vcxproj. -->
+  <ItemGroup Condition="'$(MSBuildProjectName)' == 'MuteMic'">
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.6.250108002" />
+    <PackageReference Include="Microsoft.Windows.CppWinRT" Version="2.0.240405.15" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.1742" />
+    <PackageReference Include="Microsoft.Windows.ImplementationLibrary" Version="1.0.240122.1" />
+    <PackageReference Include="Microsoft.Graphics.Win2D" Version="1.2.0" />
+  </ItemGroup>
+
+  <!-- WinMD references for MIDL/CppWinRT type resolution. -->
+  <ItemGroup Condition="'$(MSBuildProjectName)' == 'MuteMic'">
+    <Reference Include="Microsoft.UI.Xaml">
+      <HintPath>C:\Users\DarkW\.nuget\packages\microsoft.windowsappsdk\1.6.250108002\lib\uap10.0\Microsoft.UI.Xaml.winmd</HintPath>
+      <IsWinMDFile>true</IsWinMDFile>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Microsoft.UI">
+      <HintPath>C:\Users\DarkW\.nuget\packages\microsoft.windowsappsdk\1.6.250108002\lib\uap10.0.18362\Microsoft.UI.winmd</HintPath>
+      <IsWinMDFile>true</IsWinMDFile>
+      <Private>false</Private>
+    </Reference>
+    <!-- Win2D (Liquid Glass): si la versión cambia, actualizar ruta y el
+         Copy del vcxproj. -->
+    <Reference Include="Microsoft.Graphics.Canvas">
+      <HintPath>C:\Users\DarkW\.nuget\packages\microsoft.graphics.win2d\1.2.0\lib\uap10.0\Microsoft.Graphics.Canvas.winmd</HintPath>
+      <IsWinMDFile>true</IsWinMDFile>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <!-- Populate reference path for XAML markup compilation. -->
+  <Target Name="PopulateReferencePath" BeforeTargets="MarkupCompilePass1">
+    <ItemGroup>
+      <ReferencePath Include="C:\Users\DarkW\.nuget\packages\microsoft.windowsappsdk\1.6.250108002\lib\uap10.0\Microsoft.UI.Xaml.winmd" />
+      <ReferencePath Include="C:\Users\DarkW\.nuget\packages\microsoft.windowsappsdk\1.6.250108002\lib\uap10.0.18362\Microsoft.UI.winmd" />
+      <ReferencePath Include="C:\Users\DarkW\.nuget\packages\microsoft.windowsappsdk\1.6.250108002\lib\uap10.0\Microsoft.Windows.ApplicationModel.Resources.winmd" />
+      <ReferencePath Include="C:\Program Files (x86)\Windows Kits\10\References\10.0.26100.0\Windows.Foundation.FoundationContract\4.0.0.0\Windows.Foundation.FoundationContract.winmd" />
+      <ReferencePath Include="C:\Program Files (x86)\Windows Kits\10\References\10.0.26100.0\Windows.Foundation.UniversalApiContract\19.0.0.0\Windows.Foundation.UniversalApiContract.winmd" />
+    </ItemGroup>
+  </Target>
+</Project>

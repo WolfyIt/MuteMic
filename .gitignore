@@ -1,0 +1,21 @@
+# Build outputs (VS / MSBuild)
+x64/
+obj/
+MuteMic/
+.vs/
+*.exe
+*.obj
+*.pdb
+*.ilk
+*.cso
+*.winmd
+*.log
+
+# NuGet local artifacts
+packages/
+*.nuget.g.props
+*.nuget.g.targets
+
+# Salidas del XAML compiler que se regeneran en $(IntDir).
+# OJO: "Generated Files/" en la RAÍZ sí va al repo (los *.xaml.g.h
+# mantenidos a mano — ver .github/copilot-instructions.md).

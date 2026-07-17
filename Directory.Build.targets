@@ -1,0 +1,41 @@
+<Project>
+  <!-- Mirrors NUCSoftwareStudio's working targets: MIDL unmerged output,
+       XAML regen guard, and Pass2-before-ClCompile ordering. -->
+
+  <ItemDefinitionGroup>
+    <Midl>
+      <MetadataFileName>$(IntDir)Unmerged\%(Filename).winmd</MetadataFileName>
+    </Midl>
+  </ItemDefinitionGroup>
+
+  <!-- Force full XAML re-generation when any expected .xaml.g.hpp is absent. -->
+  <Target Name="ForceXamlRegenWhenHppMissing"
+          BeforeTargets="MarkupCompilePass1"
+          Condition="'$(MSBuildProjectName)' == 'MuteMic'">
+    <ItemGroup>
+      <!-- Los .g.hpp se generan en $(IntDir) en este proyecto (no en
+           Generated Files\ como en NUCS). -->
+      <_ExpectedHpp Include="$(MSBuildProjectDirectory)\$(IntDir)App.xaml.g.hpp" />
+      <_ExpectedHpp Include="$(MSBuildProjectDirectory)\$(IntDir)MainWindow.xaml.g.hpp" />
+      <_ExpectedHpp Include="$(MSBuildProjectDirectory)\$(IntDir)XamlTypeInfo.g.cpp" />
+    </ItemGroup>
+    <ItemGroup>
+      <_MissingHpp Include="@(_ExpectedHpp)" Condition="!Exists('%(_ExpectedHpp.Identity)')" />
+      <_XamlState  Include="$(MSBuildProjectDirectory)\**\XamlSaveStateFile.xml" />
+    </ItemGroup>
+    <Message Importance="high"
+             Condition="'@(_MissingHpp)' != ''"
+             Text="XAML: missing generated hpp (@(_MissingHpp)) -> invalidating XamlSaveStateFile.xml to force regen." />
+    <Delete Files="@(_XamlState)" Condition="'@(_MissingHpp)' != ''" />
+  </Target>
+
+  <!-- Guarantee MarkupCompilePass2 finishes before ANY ClCompile. -->
+  <Target Name="_XamlPass2BeforeClCompile"
+          BeforeTargets="ClCompile"
+          DependsOnTargets="MarkupCompilePass2"
+          Condition="'$(MSBuildProjectName)' == 'MuteMic'" />
+
+  <PropertyGroup Condition="'$(MSBuildProjectName)' == 'MuteMic'">
+    <ClCompileDependsOn>MarkupCompilePass2;$(ClCompileDependsOn)</ClCompileDependsOn>
+  </PropertyGroup>
+</Project>

@@ -1,0 +1,9 @@
+/// App.idl — Application runtime class
+namespace MuteMic
+{
+    [default_interface]
+    runtimeclass App : Microsoft.UI.Xaml.Application
+    {
+        App();
+    }
+}

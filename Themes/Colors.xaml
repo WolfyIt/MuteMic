@@ -1,0 +1,68 @@
+<!-- Colors.xaml — Paleta de MuteMic con DOS temas vía ThemeDictionaries:
+       Default (Dark)  = Acrylic Dark (negro + neón)
+       Light           = Liquid Glass (cristal iOS: blanco translúcido)
+     Cambiar root.RequestedTheme() re-resuelve todos los {ThemeResource} en vivo. -->
+
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <ResourceDictionary.ThemeDictionaries>
+
+        <!-- ══ ACRYLIC DARK ══ -->
+        <ResourceDictionary x:Key="Default">
+            <SolidColorBrush x:Key="NssCardBrush" Color="#FF0E0E0E"/>
+            <SolidColorBrush x:Key="NssCardHoverBrush" Color="#FF161616"/>
+            <SolidColorBrush x:Key="NssBorderSubtleBrush" Color="#0AFFFFFF"/>
+            <SolidColorBrush x:Key="NssBorderBrush" Color="#14FFFFFF"/>
+            <SolidColorBrush x:Key="NssBorderHoverBrush" Color="#1FFFFFFF"/>
+            <SolidColorBrush x:Key="NssTextBrush" Color="#FFE8E8F0"/>
+            <SolidColorBrush x:Key="NssTextSecondaryBrush" Color="#66FFFFFF"/>
+            <SolidColorBrush x:Key="NssTextDimBrush" Color="#40FFFFFF"/>
+            <SolidColorBrush x:Key="NssControlFillBrush" Color="#10FFFFFF"/>
+            <SolidColorBrush x:Key="NssTrackBrush" Color="#14FFFFFF"/>
+            <SolidColorBrush x:Key="NssToggleOnBrush" Color="#FF39FF14"/>
+        </ResourceDictionary>
+
+        <!-- ══ LIQUID GLASS ══
+             Cristal translúcido sobre el acrílico claro: cards de vidrio con
+             highlight blanco arriba y borde luminoso (ref: LiquidGlass). -->
+        <ResourceDictionary x:Key="Light">
+            <SolidColorBrush x:Key="NssCardBrush" Color="#38FFFFFF"/>
+            <SolidColorBrush x:Key="NssCardHoverBrush" Color="#50FFFFFF"/>
+            <SolidColorBrush x:Key="NssBorderSubtleBrush" Color="#40FFFFFF"/>
+            <SolidColorBrush x:Key="NssBorderBrush" Color="#78FFFFFF"/>
+            <SolidColorBrush x:Key="NssBorderHoverBrush" Color="#A8FFFFFF"/>
+            <SolidColorBrush x:Key="NssTextBrush" Color="#FF17181C"/>
+            <SolidColorBrush x:Key="NssTextSecondaryBrush" Color="#8A17181C"/>
+            <SolidColorBrush x:Key="NssTextDimBrush" Color="#5517181C"/>
+            <SolidColorBrush x:Key="NssControlFillBrush" Color="#48FFFFFF"/>
+            <SolidColorBrush x:Key="NssTrackBrush" Color="#3AFFFFFF"/>
+            <SolidColorBrush x:Key="NssToggleOnBrush" Color="#FF34C759"/>
+        </ResourceDictionary>
+
+    </ResourceDictionary.ThemeDictionaries>
+
+    <!-- ══ Acentos neón (compartidos entre temas: son semánticos) ══ -->
+    <Color x:Key="NssGreen">#FF39FF14</Color>          <!-- verde neón cartel -->
+    <Color x:Key="NssGreenDim">#2239FF14</Color>
+    <Color x:Key="NssRed">#FFFF3131</Color>            <!-- rojo neón -->
+    <Color x:Key="NssRedDim">#22FF3131</Color>
+    <Color x:Key="NssCyan">#FF00D4FF</Color>
+    <Color x:Key="NssCyanDim">#1A00D4FF</Color>
+    <Color x:Key="NssAmber">#FFFFAB00</Color>
+
+    <SolidColorBrush x:Key="NssGreenBrush" Color="{StaticResource NssGreen}"/>
+    <SolidColorBrush x:Key="NssGreenDimBrush" Color="{StaticResource NssGreenDim}"/>
+    <SolidColorBrush x:Key="NssRedBrush" Color="{StaticResource NssRed}"/>
+    <SolidColorBrush x:Key="NssRedDimBrush" Color="{StaticResource NssRedDim}"/>
+    <SolidColorBrush x:Key="NssCyanBrush" Color="{StaticResource NssCyan}"/>
+    <SolidColorBrush x:Key="NssCyanDimBrush" Color="{StaticResource NssCyanDim}"/>
+    <SolidColorBrush x:Key="NssAmberBrush" Color="{StaticResource NssAmber}"/>
+
+    <!-- ══ Dimensions ══ -->
+    <CornerRadius x:Key="NssCardRadius">14</CornerRadius>
+    <CornerRadius x:Key="NssBadgeRadius">6</CornerRadius>
+    <Thickness x:Key="NssCardBorder">1</Thickness>
+    <Thickness x:Key="NssCardPadding">16,14,16,16</Thickness>
+
+</ResourceDictionary>
