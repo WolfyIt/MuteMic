@@ -19,6 +19,14 @@
 
 ---
 
+## Download
+
+Grab the latest zip from [Releases](https://github.com/WolfyIt/MuteMic/releases) — unzip anywhere and run `MuteMic.exe`.
+One-time prerequisite: `winget install Microsoft.WindowsAppRuntime.1.6`.
+Prefer building from source? See [Build](#build).
+
+---
+
 ## Features
 
 **Mute from anything.** Shortcut *cards* let you bind as many inputs as you want, each with its own name and mode: keyboard keys or combos (including macro keys like NZXT / Razer keys mapped to F13–F24), mouse buttons (M3/M4/M5), and XInput controller buttons. Cards auto-detect the device type on capture, show a presence dot for controllers, and can be added, renamed, tested, or removed on the fly.
