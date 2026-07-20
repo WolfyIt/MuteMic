@@ -10,6 +10,13 @@
   <br>WinUI 3 · C++/WinRT · zero Electron, zero background bloat.
 </p>
 
+<p align="center">
+  <img alt="Platform" src="https://img.shields.io/badge/platform-Windows%2011-0078D4?logo=windows11&logoColor=white">
+  <img alt="Stack" src="https://img.shields.io/badge/WinUI%203-C%2B%2B%2FWinRT-9B59B6">
+  <img alt="License" src="https://img.shields.io/badge/license-MIT-39FF14">
+  <img alt="Footprint" src="https://img.shields.io/badge/servers%20%2F%20open%20ports-none-FF3131">
+</p>
+
 ---
 
 ## Features
