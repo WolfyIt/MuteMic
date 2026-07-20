@@ -17,6 +17,10 @@
   <img alt="Footprint" src="https://img.shields.io/badge/servers%20%2F%20open%20ports-none-FF3131">
 </p>
 
+<p align="center">
+  <img src="docs/main-night.png" width="440" alt="MuteMic main window — Night theme, three bound devices">
+</p>
+
 ---
 
 ## Download
@@ -57,6 +61,8 @@ If MuteMic is already running, the verb is forwarded to the live instance in mil
 
 ### Main window — Night & Light
 
+Shown with three shortcut cards bound: keyboard, mouse and controller.
+
 | Night | Light |
 |:---:|:---:|
 | <img src="docs/main-night.png" width="380"> | <img src="docs/main-light.png" width="380"> |
@@ -77,14 +83,6 @@ Real refraction over your desktop — clear, or with Frosting.
 | <img src="docs/main-glass-light.png" width="380"> | <img src="docs/main-frosted-light.png" width="380"> |
 
 </details>
-
-### Shortcut cards
-
-One card per input — keyboard, mouse, controller — each with its own binding, mode, and name.
-
-| Keyboard + controller | Keyboard + controller + mouse |
-|:---:|:---:|
-| <img src="docs/shortcut-cards-2.png" width="380"> | <img src="docs/shortcut-cards-3.png" width="380"> |
 
 ### Settings
 

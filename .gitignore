@@ -22,3 +22,6 @@ packages/
 
 # Media fuente (los procesados van en docs/)
 MuteMicViews/
+
+# Paquetes de release (van a GitHub Releases, no al repo)
+*.zip
