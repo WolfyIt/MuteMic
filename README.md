@@ -40,7 +40,71 @@ If MuteMic is already running, the verb is forwarded to the live instance in mil
 
 ## Screenshots
 
-<!-- TODO: main window · settings · tray flyout · visual cues -->
+### Main window — Night & Light
+
+| Night | Light |
+|:---:|:---:|
+| <img src="docs/main-night.png" width="380"> | <img src="docs/main-light.png" width="380"> |
+
+### Liquid Glass
+
+Real refraction over your desktop — clear, or with Frosting.
+
+| Clear glass | Frosted glass |
+|:---:|:---:|
+| <img src="docs/main-glass-night.png" width="380"> | <img src="docs/main-frosted-night.png" width="380"> |
+
+<details>
+<summary>Light theme variants</summary>
+
+| Clear glass | Frosted glass |
+|:---:|:---:|
+| <img src="docs/main-glass-light.png" width="380"> | <img src="docs/main-frosted-light.png" width="380"> |
+
+</details>
+
+### Shortcut cards
+
+One card per input — keyboard, mouse, controller — each with its own binding, mode, and name.
+
+| Keyboard + controller | Keyboard + controller + mouse |
+|:---:|:---:|
+| <img src="docs/shortcut-cards-2.png" width="380"> | <img src="docs/shortcut-cards-3.png" width="380"> |
+
+### Settings
+
+| Night | Light |
+|:---:|:---:|
+| <img src="docs/settings-night.png" width="380"> | <img src="docs/settings-light.png" width="380"> |
+
+<details>
+<summary>Liquid Glass variants</summary>
+
+| Clear · Night | Clear · Light |
+|:---:|:---:|
+| <img src="docs/settings-glass-night.png" width="380"> | <img src="docs/settings-glass-light.png" width="380"> |
+
+| Frosted · Night | Frosted · Light |
+|:---:|:---:|
+| <img src="docs/settings-frosted-night.png" width="380"> | <img src="docs/settings-frosted-light.png" width="380"> |
+
+</details>
+
+### Tray flyout
+
+| Night | Light | Glass · Night | Glass · Light |
+|:---:|:---:|:---:|:---:|
+| <img src="docs/flyout-night.png" width="200"> | <img src="docs/flyout-light.png" width="200"> | <img src="docs/flyout-glass-night.png" width="200"> | <img src="docs/flyout-glass-light.png" width="200"> |
+
+### Visual cues in action
+
+Edge ring, corner brackets, and the notch — vsynced to your monitor, game-safe.
+
+| Edges | Corners |
+|:---:|:---:|
+| <img src="docs/cue-edges.gif" width="380"> | <img src="docs/cue-corners.gif" width="380"> |
+
+<p align="center"><img src="docs/cue-notch.gif" width="500"></p>
 
 ## Build
 

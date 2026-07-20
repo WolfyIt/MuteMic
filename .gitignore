@@ -19,3 +19,6 @@ packages/
 # Salidas del XAML compiler que se regeneran en $(IntDir).
 # OJO: "Generated Files/" en la RAÍZ sí va al repo (los *.xaml.g.h
 # mantenidos a mano — ver .github/copilot-instructions.md).
+
+# Media fuente (los procesados van en docs/)
+MuteMicViews/
