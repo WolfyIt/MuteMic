@@ -25,3 +25,8 @@ MuteMicViews/
 
 # Paquetes de release (van a GitHub Releases, no al repo)
 *.zip
+
+# Metodologia privada (no sube a GitHub)
+.claude/
+ROADMAP.md
+COPILOT_TASK.md
