@@ -75,6 +75,23 @@ Fallos probables y sus fixes:
 - **Las propiedades del efecto no matchean**: los nombres en
   `props.Insert(L"...")` deben coincidir EXACTO con el cbuffer del .hlsl;
   float2 se pasa como `PropertyValue::CreateSingleArray` de 2 floats.
+- **Arquitectura v2: UNA captura compartida + N LENTES.** `Shared` tiene el
+  snapshot, la sesión de captura y los hooks; cada `Lens` (ventana principal,
+  flyout del tray, futuros overlays) tiene su hwnd, su host, su CanvasControl
+  y su PROPIO grafo de efectos (el shader recibe el tamaño de SU ventana).
+  Añadir una ventana con cristal = `AttachLens(hwnd, grid)`, nunca copiar el
+  pipeline.
+- **NUNCA recapturar al mover una ventana.** El snapshot se toma con TODAS
+  nuestras ventanas excluidas (`WDA_EXCLUDEFROMCAPTURE`), así que sigue
+  siendo válido las muevas donde las muevas: mover solo cambia qué zona se
+  muestrea. Recapturar en cada movimiento (el ciclo de 150 ms de la v1) era
+  la causa del **jitter al arrastrar**.
+- **El snapshot se refresca por EVENTOS**: `SetWinEventHook` a
+  `EVENT_SYSTEM_FOREGROUND` y `EVENT_OBJECT_LOCATIONCHANGE`, filtrando
+  nuestro propio proceso y nuestras lentes, con debounce de 220 ms
+  (`ScheduleRecapture`). Eso arregla el "frame congelado" sin costo en reposo.
+- El host de una lente puede cambiar (el flyout se reconstruye entero al
+  cambiar de tema): `AttachLens` detecta el host nuevo y muda el canvas.
 - **REGLA DE ORO de compositores**: `CompositionTarget::GetCompositorForCurrentThread()`
   devuelve un `Microsoft::UI::Composition::Compositor`. NUNCA castearlo a
   `Windows::UI::Composition::Compositor` (QI falla y el catch degrada a

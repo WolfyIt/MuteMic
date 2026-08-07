@@ -19,6 +19,7 @@
 #include <cstdio>                       // CrashLogger
 
 #include "Core/MuteMicCore.h"
+#include "Core/LiquidGlassBackdrop.h"
 
 using namespace winrt;
 using namespace winrt::Microsoft::UI::Xaml;
@@ -58,9 +59,9 @@ struct FlyoutPalette {
 
 // (theme: 0 night / 1 light) × (glass on/off) → 4 paletas.
 // Night = negro de verdad, sin borde blanco (espejo del light, que sí gusta).
-// Los modos glass dejan root translúcido para que el acrylic de atrás
-// haga de cristal (frost) — la refracción real del shader es solo de la
-// ventana principal; en un menú transitorio el acrylic translúcido cumple.
+// Los modos glass dejan root translúcido para que se vea el cristal de
+// atrás: con Liquid Glass activo el flyout es una LENTE real del backdrop
+// (misma refracción que la ventana principal); si no, cae al acrylic.
 FlyoutPalette PaletteFor(UINT theme, bool glass) {
     const bool light = (theme == 1);
     if (light && glass)
@@ -305,13 +306,19 @@ namespace winrt::MuteMic::implementation
         quitRow.Click([](auto&&, auto&&) { MuteMicCore::Get().RequestExit(); });
         panel.Children().Append(quitRow);
 
+        // Grid intermedio: el Border solo admite UN hijo, y la lente de
+        // Liquid Glass necesita insertarse DEBAJO del panel. Con el grid,
+        // canvas y contenido conviven en la misma celda.
+        m_flyStack = MUXC::Grid();
+        m_flyStack.Children().Append(panel);
+
         // Root con fondo del tema, borde hairline y radio — look nativo.
         m_flyRoot = MUXC::Border();
         m_flyRoot.Background(Media::SolidColorBrush{ pal.root });
         m_flyRoot.BorderBrush(Media::SolidColorBrush{ pal.border });
         m_flyRoot.BorderThickness({ 1, 1, 1, 1 });
         m_flyRoot.CornerRadius({ 8, 8, 8, 8 });
-        m_flyRoot.Child(panel);
+        m_flyRoot.Child(m_flyStack);
 
         if (firstBuild)
         {
@@ -375,6 +382,8 @@ namespace winrt::MuteMic::implementation
             // 0xC0000005 al salir en WinUI 3.
             m_flyout.Closed([this](auto&&, auto&&)
             {
+                if (HWND h = HwndOf(m_flyout))
+                    mutemic::LiquidGlassBackdrop::DetachLens(h);
                 if (m_flyAcrylic)
                 {
                     try {
@@ -395,20 +404,39 @@ namespace winrt::MuteMic::implementation
         // Glass: los rows heredan tema claro para el hover correcto.
         m_flyRoot.RequestedTheme(theme == 1 ? ElementTheme::Light : ElementTheme::Dark);
 
-        // Tinte del acrylic acorde al modo (glass = más transparente).
+        // ── Liquid Glass real en el flyout ──
+        // Con glass activo el flyout se registra como LENTE del backdrop:
+        // comparte el snapshot del monitor y pinta su propia región con el
+        // shader de refracción. El acrylic se apaga (sería una capa encima
+        // del cristal) y el fondo del root se vuelve casi transparente para
+        // que el cristal se vea.
+        const bool glassMode = s.glass && mutemic::LiquidGlassBackdrop::IsActive();
+        if (HWND flyHwnd = HwndOf(m_flyout))
+        {
+            if (glassMode)
+                mutemic::LiquidGlassBackdrop::AttachLens(flyHwnd, m_flyStack);
+            else
+                mutemic::LiquidGlassBackdrop::DetachLens(flyHwnd);
+        }
+
+        // Tinte del acrylic acorde al modo (apagado cuando hay cristal).
         if (m_flyAcrylic)
         {
             const bool light = (theme == 1);
-            const bool glassMode = s.glass;
-            if (light) {
+            if (glassMode) {
+                // Cristal real detrás: el acrylic solo estorbaría.
+                m_flyAcrylic.TintOpacity(0.0f);
+                m_flyAcrylic.LuminosityOpacity(0.0f);
+                m_flyAcrylic.TintColor(Argb(0x00, 0, 0, 0));
+            } else if (light) {
                 m_flyAcrylic.TintColor(Argb(0xFF, 246, 247, 250));
-                m_flyAcrylic.TintOpacity(glassMode ? 0.18f : 0.70f);
-                m_flyAcrylic.LuminosityOpacity(glassMode ? 0.50f : 0.85f);
+                m_flyAcrylic.TintOpacity(0.70f);
+                m_flyAcrylic.LuminosityOpacity(0.85f);
                 m_flyAcrylic.FallbackColor(Argb(0xFF, 240, 242, 246));
             } else {
                 m_flyAcrylic.TintColor(Argb(0xFF, 12, 13, 16));
-                m_flyAcrylic.TintOpacity(glassMode ? 0.25f : 0.75f);
-                m_flyAcrylic.LuminosityOpacity(glassMode ? 0.45f : 0.90f);
+                m_flyAcrylic.TintOpacity(0.75f);
+                m_flyAcrylic.LuminosityOpacity(0.90f);
                 m_flyAcrylic.FallbackColor(Argb(0xFF, 14, 15, 18));
             }
         }
@@ -496,6 +524,9 @@ namespace winrt::MuteMic::implementation
         m_flyout.Activate();
         g_flyHwnd = hwnd;
         InstallFlyoutMouseHook();
+        // La lente lee la posición de la ventana al dibujar: repintar DESPUÉS
+        // de moverla, o el cristal mostraría la zona donde estaba antes.
+        mutemic::LiquidGlassBackdrop::RequestRedraw();
         (void)anchorY;
     }
 }

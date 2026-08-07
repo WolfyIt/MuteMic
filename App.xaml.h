@@ -27,6 +27,8 @@ namespace winrt::MuteMic::implementation
         winrt::Microsoft::UI::Composition::SystemBackdrops::DesktopAcrylicController m_flyAcrylic{ nullptr };
         winrt::Microsoft::UI::Composition::SystemBackdrops::SystemBackdropConfiguration m_flyBackdropConfig{ nullptr };
         winrt::Microsoft::UI::Xaml::Controls::Border m_flyRoot{ nullptr };
+        // Capa intermedia: aloja la lente de Liquid Glass bajo el contenido.
+        winrt::Microsoft::UI::Xaml::Controls::Grid m_flyStack{ nullptr };
         winrt::Microsoft::UI::Xaml::Shapes::Ellipse m_flyLed{ nullptr };
         winrt::Microsoft::UI::Xaml::Controls::TextBlock m_flyState{ nullptr };
         winrt::Microsoft::UI::Xaml::Controls::TextBlock m_flyMuteLabel{ nullptr };
