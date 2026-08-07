@@ -171,6 +171,27 @@ std::vector<uint8_t> LoadShaderBlob() {
 // Excluir/incluir TODAS nuestras ventanas de la captura: si una lente
 // aparece en el snapshot que ella misma muestrea, se produce el efecto
 // túnel infinito.
+// Ventanas del shell que se superponen SIN ser "el fondo": el switcher de
+// Alt+Tab, la Vista de tareas, el staging del foco. Si se capturara con
+// alguna de ellas en pantalla, el overlay quedaría horneado en el cristal;
+// y si se reaccionara a su cambio de foco, se re-renderizaría para una
+// ventana que en ese momento solo existe como miniatura.
+bool IsShellSwitcherWindow(HWND h) {
+    wchar_t cls[64]{};
+    if (!GetClassNameW(h, cls, ARRAYSIZE(cls))) return false;
+    return  wcscmp(cls, L"XamlExplorerHostIslandWindow") == 0 ||  // Alt+Tab / Task View (Win11)
+            wcscmp(cls, L"MultitaskingViewFrame") == 0 ||         // Vista de tareas
+            wcscmp(cls, L"TaskSwitcherWnd") == 0 ||               // Alt+Tab clásico
+            wcscmp(cls, L"TaskSwitcherOverlayWnd") == 0 ||
+            wcscmp(cls, L"ForegroundStaging") == 0;
+}
+
+// ¿Está el switcher en pantalla ahora mismo?
+bool SwitcherIsUp() {
+    HWND fg = GetForegroundWindow();
+    return fg && IsShellSwitcherWindow(fg);
+}
+
 // ¿Hay una ventana ajena que cubra ENTERA a esta? Recorre el Z-order hacia
 // arriba (GW_HWNDPREV = más cerca del frente). No hace unión de regiones a
 // propósito: el caso que importa —y el único barato de calcular— es "una
@@ -374,6 +395,12 @@ Lens* FirstVisibleLens() {
 void DoRecapture() {
     if (!g.active) return;
     if (g.session) return;                  // ya hay un ciclo en curso
+
+    // Con el Alt+Tab en pantalla, el monitor tiene un overlay que NO es el
+    // fondo real: capturar ahora lo hornearía en el cristal. Reintentar
+    // cuando se cierre (al soltar Alt llega otro cambio de foreground).
+    if (SwitcherIsUp()) return;
+
     Lens* visible = FirstVisibleLens();
     // Oculta en el tray o tapada por otra ventana: el cristal no se ve,
     // capturar el monitor sería gasto puro. Al destaparse llega un evento
@@ -428,6 +455,9 @@ void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd,
     DWORD pid = 0;
     GetWindowThreadProcessId(hwnd, &pid);
     if (pid == GetCurrentProcessId()) return;
+
+    // El switcher de Alt+Tab no es "el fondo": ignorarlo por completo.
+    if (IsShellSwitcherWindow(hwnd)) return;
 
     // LOCATIONCHANGE es el único torrente continuo; el resto son cambios de
     // golpe que dejan el snapshot mostrando algo que ya no existe.
