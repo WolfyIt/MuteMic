@@ -141,7 +141,6 @@ Windows 11 is the target; Windows 10 2004+ works with graceful degradation (no r
 - `Core/` is pure Win32/COM: Core Audio (`IAudioEndpointVolume`, `IAudioMeterInformation`), low-level keyboard/mouse hooks, XInput polling, tray, GDI+ icon rendering.
 - `Core/LiquidGlass.hlsl` + `LiquidGlassBackdrop` implement the refraction backdrop (Windows.Graphics.Capture → Win2D `PixelShaderEffect` → `CanvasControl`).
 - `Core/VisualCue.cpp` implements the anti-FPS-drop overlay architecture (DirectComposition presentation, per-region windows, compositor-clock pacing).
-- `legacy-win32/` contains the original pure-Win32 prototype this project grew out of.
 
 ## License
 
