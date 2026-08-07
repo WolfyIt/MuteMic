@@ -42,7 +42,15 @@ constexpr GlassParams kClear{ 16.0f, 90.0f, 1.779f, 0.992f, 2.332f, 4.544f, 6.92
                               0.0f, 0.0f, 0.06f, 0.0f };
 
 constexpr int kMaxLenses = 4;          // principal, flyout, y margen a futuro
-constexpr UINT kRecaptureDelayMs = 220;  // debounce del refresco por eventos
+// Eventos CONTINUOS (arrastrar otra ventana): debounce largo, no tiene
+// sentido recapturar 60 veces por segundo mientras alguien mueve algo.
+constexpr UINT kRecaptureDelayMs = 220;
+// Eventos DISCRETOS (minimizar, cerrar, cambiar de app): el fondo ya cambió
+// y el cristal muestra algo que YA NO EXISTE. Respuesta casi inmediata...
+constexpr UINT kDiscreteDelayMs = 45;
+// ...más una segunda pasada cuando la animación del sistema terminó (las de
+// minimizar/restaurar de Windows duran ~200 ms).
+constexpr UINT kSettleDelayMs = 340;
 
 // ── Una LENTE: una ventana que pinta el snapshot con refracción ──
 // Cada lente tiene su propio grafo de efectos porque el shader recibe el
@@ -94,9 +102,11 @@ struct Shared {
     ULONGLONG lastFrameMs = 0;     // throttle del pipeline a ~30 fps
 
     // Refresco por eventos del escritorio (en vez de recapturar al mover).
-    HWINEVENTHOOK hookForeground = nullptr;
-    HWINEVENTHOOK hookLocation = nullptr;
-    UINT_PTR recaptureTimer = 0;
+    HWINEVENTHOOK hookSystem = nullptr;      // foreground, move/size, minimize
+    HWINEVENTHOOK hookVisibility = nullptr;  // destroy, show, hide
+    HWINEVENTHOOK hookLocation = nullptr;    // movimiento continuo
+    UINT_PTR recaptureTimer = 0;   // debounce de eventos continuos
+    UINT_PTR settleTimer = 0;      // 2ª pasada tras animaciones del sistema
 
     Lens lenses[kMaxLenses];
 };
@@ -321,12 +331,27 @@ void DoRecapture() {
 
 void CALLBACK RecaptureTimerProc(HWND, UINT, UINT_PTR id, DWORD) {
     KillTimer(nullptr, id);
-    g.recaptureTimer = 0;
+    if (id == g.recaptureTimer) g.recaptureTimer = 0;
+    if (id == g.settleTimer) g.settleTimer = 0;
     DoRecapture();
 }
 
-void ScheduleRecapture() {
+// discrete = el fondo YA cambió de golpe (app minimizada, cerrada, alt-tab).
+// continuous = algo se está moviendo y seguirán llegando eventos.
+void ScheduleRecapture(bool discrete) {
     if (!g.active || !g.shareFriendly) return;
+
+    if (discrete) {
+        // Rápido: el cristal está mostrando una ventana que ya no está ahí.
+        if (g.recaptureTimer) KillTimer(nullptr, g.recaptureTimer);
+        g.recaptureTimer = SetTimer(nullptr, 0, kDiscreteDelayMs, RecaptureTimerProc);
+        // Y otra vez al terminar la animación de Windows: el primer disparo
+        // puede capturar la ventana a medio desvanecerse.
+        if (g.settleTimer) KillTimer(nullptr, g.settleTimer);
+        g.settleTimer = SetTimer(nullptr, 0, kSettleDelayMs, RecaptureTimerProc);
+        return;
+    }
+
     // Debounce con reinicio: mientras sigan llegando eventos no se recaptura.
     if (g.recaptureTimer) KillTimer(nullptr, g.recaptureTimer);
     g.recaptureTimer = SetTimer(nullptr, 0, kRecaptureDelayMs, RecaptureTimerProc);
@@ -346,28 +371,40 @@ void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd,
     GetWindowThreadProcessId(hwnd, &pid);
     if (pid == GetCurrentProcessId()) return;
 
-    if (event == EVENT_OBJECT_LOCATIONCHANGE && !IsWindowVisible(hwnd)) return;
+    // LOCATIONCHANGE es el único torrente continuo; el resto son cambios de
+    // golpe que dejan el snapshot mostrando algo que ya no existe.
+    const bool discrete = (event != EVENT_OBJECT_LOCATIONCHANGE);
+    if (!discrete && !IsWindowVisible(hwnd)) return;
 
-    ScheduleRecapture();
+    ScheduleRecapture(discrete);
 }
 
 void InstallEventHooks() {
-    if (g.hookForeground) return;
+    if (g.hookSystem) return;
     // WINEVENT_OUTOFCONTEXT: el callback llega por la cola de mensajes de
     // ESTE hilo (UI). Sin inyección de DLL en otros procesos.
-    g.hookForeground = SetWinEventHook(
-        EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, nullptr,
-        WinEventProc, 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+    const DWORD flags = WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS;
+
+    // Rango contiguo: FOREGROUND, MOVESIZESTART/END, MINIMIZESTART/END.
+    g.hookSystem = SetWinEventHook(
+        EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND, nullptr,
+        WinEventProc, 0, 0, flags);
+    // Ventanas que se destruyen, se muestran o se esconden.
+    g.hookVisibility = SetWinEventHook(
+        EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE, nullptr,
+        WinEventProc, 0, 0, flags);
     g.hookLocation = SetWinEventHook(
         EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE, nullptr,
-        WinEventProc, 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+        WinEventProc, 0, 0, flags);
     Log("win event hooks installed");
 }
 
 void RemoveEventHooks() {
-    if (g.hookForeground) { UnhookWinEvent(g.hookForeground); g.hookForeground = nullptr; }
+    if (g.hookSystem) { UnhookWinEvent(g.hookSystem); g.hookSystem = nullptr; }
+    if (g.hookVisibility) { UnhookWinEvent(g.hookVisibility); g.hookVisibility = nullptr; }
     if (g.hookLocation) { UnhookWinEvent(g.hookLocation); g.hookLocation = nullptr; }
     if (g.recaptureTimer) { KillTimer(nullptr, g.recaptureTimer); g.recaptureTimer = 0; }
+    if (g.settleTimer) { KillTimer(nullptr, g.settleTimer); g.settleTimer = 0; }
 }
 
 void OnDraw(MGCX::CanvasControl const& sender, MGCX::CanvasDrawEventArgs const& args) {
@@ -708,7 +745,7 @@ void LiquidGlassBackdrop::RequestRedraw() {
 
 void LiquidGlassBackdrop::RefreshCapture() {
     if (!g.active) return;
-    ScheduleRecapture();
+    ScheduleRecapture(true);   // petición explícita: tratarla como discreta
 }
 
 void LiquidGlassBackdrop::SetFrost(bool frost) {
