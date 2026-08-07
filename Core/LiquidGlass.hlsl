@@ -67,6 +67,23 @@ D2D_PS_ENTRY(main)
         return c0;
     }
 
+    // ── Interior plano: fetch EXACTO, sin refracción ──
+    // Más allá de la banda la curva ya vale 1 (k=1 → spos=pos), pero pasar
+    // igual por D2DSampleInputAtPosition con una posición calculada deja el
+    // muestreo a merced del filtro bilineal: basta un error de fracción de
+    // píxel para que el texto de atrás pierda nitidez. Muestrear en `pos`
+    // directamente garantiza copia 1:1 — y de paso ahorra toda la ALU de
+    // refracción y glow en la mayor parte de la ventana.
+    // (El ruido se conserva: es parte del look "frosted". El blur, cuando
+    // lo hay, se aplica antes en el grafo de efectos, así que no se pierde.)
+    if (-d >= bandPx)
+    {
+        float4 ci = D2DSampleInputAtPosition(0, pos);
+        ci.rgb += (rnd(pos * 1e-3) - 0.5) * noiseAmt;
+        ci.a = 1.0;
+        return ci;
+    }
+
     // Profundidad normalizada dentro de la banda de refracción.
     float t = saturate(-d / bandPx);
 

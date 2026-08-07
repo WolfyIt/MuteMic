@@ -2,6 +2,7 @@
 #include "LiquidGlassBackdrop.h"
 
 #include <algorithm>
+#include <cmath>
 #include <d3d11.h>
 #include <fstream>
 #include <vector>
@@ -423,8 +424,12 @@ void OnDraw(MGCX::CanvasControl const& sender, MGCX::CanvasDrawEventArgs const& 
     lens->lastTopLeft = tl;
     lens->lastPosQpc = now;
 
-    const float ox = static_cast<float>(tl.x - mi.rcMonitor.left) + predX;
-    const float oy = static_cast<float>(tl.y - mi.rcMonitor.top) + predY;
+    // Redondeo a píxel ENTERO: si la traslación cae en medio píxel, D2D
+    // interpola bilinealmente y TODO el fondo se suaviza — el texto detrás
+    // del cristal pierde nitidez sin razón. Con offset entero, la zona sin
+    // refracción es copia 1:1 y el texto se lee igual que sin cristal.
+    const float ox = std::round(static_cast<float>(tl.x - mi.rcMonitor.left) + predX);
+    const float oy = std::round(static_cast<float>(tl.y - mi.rcMonitor.top) + predY);
     const GlassParams& P = g.frost ? kFrosted : kClear;
 
     const char* stage = "start";
