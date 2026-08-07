@@ -44,7 +44,9 @@ float sdRoundBox(float2 p, float2 b, float r)
 // centro), f→1 en el interior (sin distorsión).
 float fcurve(float x)
 {
-    return 1.0 - pb * pow(pc * M_E, -pd * x - pa);
+    // abs() en la base: pc siempre es positivo, pero fxc no puede saberlo y
+    // pow() con base negativa devuelve NaN (píxel negro). X3571.
+    return 1.0 - pb * pow(abs(pc * M_E), -pd * x - pa);
 }
 
 float rnd(float2 co)
@@ -59,46 +61,50 @@ D2D_PS_ENTRY(main)
     float2 pc2 = pos - halfSize;             // centrado, en px
 
     float d = sdRoundBox(pc2, halfSize, cornerRad);
-    if (d > 0.0)
+
+    // UN SOLO punto de salida: los `return` tempranos hacían que fxc
+    // avisara de la variable de salida del macro D2D_PS_ENTRY sin
+    // inicializar en todos los caminos (X4000).
+    float4 result;
+
+    // Dos casos comparten exactamente la misma operación —fetch 1:1 en la
+    // posición real, sin refractar—: fuera de la lente (esquinas más allá
+    // del radio) e interior plano (más allá de la banda, donde la curva ya
+    // vale 1). Muestrear en `pos` en vez de en una posición calculada
+    // garantiza copia texel a texel: si se deja al filtro bilineal, basta
+    // un error de fracción de píxel para que el texto de atrás pierda
+    // nitidez. De paso ahorra toda la ALU de refracción y glow en la mayor
+    // parte de la ventana.
+    if (d > 0.0 || -d >= bandPx)
     {
-        // Fuera de la lente (esquinas más allá del radio): sin refractar.
-        float4 c0 = D2DSampleInputAtPosition(0, pos);
-        c0.a = 1.0;
-        return c0;
+        result = D2DSampleInputAtPosition(0, pos);
+        // El ruido es parte del look "frosted" y solo aplica DENTRO de la
+        // lente. (El blur, cuando lo hay, se aplica antes en el grafo de
+        // efectos, así que no se pierde por esta vía.)
+        if (d <= 0.0)
+            result.rgb += (rnd(pos * 1e-3) - 0.5) * noiseAmt;
+    }
+    else
+    {
+        // Banda de refracción: profundidad normalizada 0..1 desde el borde.
+        float t = saturate(-d / bandPx);
+
+        // Refracción del repo: escalar la posición hacia el centro según
+        // f(t). max() protege de una base negativa → NaN (X3571).
+        float k = pow(max(fcurve(t), 1e-4), fPower);
+        float2 spos = halfSize + pc2 * k;
+
+        result = D2DSampleInputAtPosition(0, spos);
+        result.rgb += (rnd(pos * 1e-3) - 0.5) * noiseAmt;
+
+        // Glow direccional del repo: sin(atan2(y,x) - 0.5), atenuado por
+        // borde.
+        float ang = atan2(pc2.y, pc2.x);
+        float mul = sin(ang - 0.5) * glowWeight * smoothstep(glowE0, glowE1, t)
+                    + 1.0 + glowBias;
+        result.rgb *= mul;
     }
 
-    // ── Interior plano: fetch EXACTO, sin refracción ──
-    // Más allá de la banda la curva ya vale 1 (k=1 → spos=pos), pero pasar
-    // igual por D2DSampleInputAtPosition con una posición calculada deja el
-    // muestreo a merced del filtro bilineal: basta un error de fracción de
-    // píxel para que el texto de atrás pierda nitidez. Muestrear en `pos`
-    // directamente garantiza copia 1:1 — y de paso ahorra toda la ALU de
-    // refracción y glow en la mayor parte de la ventana.
-    // (El ruido se conserva: es parte del look "frosted". El blur, cuando
-    // lo hay, se aplica antes en el grafo de efectos, así que no se pierde.)
-    if (-d >= bandPx)
-    {
-        float4 ci = D2DSampleInputAtPosition(0, pos);
-        ci.rgb += (rnd(pos * 1e-3) - 0.5) * noiseAmt;
-        ci.a = 1.0;
-        return ci;
-    }
-
-    // Profundidad normalizada dentro de la banda de refracción.
-    float t = saturate(-d / bandPx);
-
-    // Refracción del repo: escalar la posición hacia el centro según f(t).
-    float k = pow(fcurve(t), fPower);
-    float2 spos = halfSize + pc2 * k;
-
-    float4 color = D2DSampleInputAtPosition(0, spos);
-    color.rgb += (rnd(pos * 1e-3) - 0.5) * noiseAmt;
-
-    // Glow direccional del repo: sin(atan2(y,x) - 0.5), atenuado por borde.
-    float ang = atan2(pc2.y, pc2.x);
-    float mul = sin(ang - 0.5) * glowWeight * smoothstep(glowE0, glowE1, t)
-                + 1.0 + glowBias;
-    color.rgb *= mul;
-    color.a = 1.0;
-    return color;
+    result.a = 1.0;
+    return result;
 }

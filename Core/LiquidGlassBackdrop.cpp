@@ -48,7 +48,9 @@ constexpr int kMaxLenses = 4;          // principal, flyout, y margen a futuro
 constexpr UINT kRecaptureDelayMs = 220;
 // Eventos DISCRETOS (minimizar, cerrar, cambiar de app): el fondo ya cambió
 // y el cristal muestra algo que YA NO EXISTE. Respuesta casi inmediata...
-constexpr UINT kDiscreteDelayMs = 45;
+constexpr UINT kDiscreteDelayMs = 10;
+// Cuánto se mantiene viva la sesión tras el último cambio (modo caliente).
+constexpr UINT kHotWindowMs = 1500;
 // ...más una segunda pasada cuando la animación del sistema terminó (las de
 // minimizar/restaurar de Windows duran ~200 ms).
 constexpr UINT kSettleDelayMs = 340;
@@ -101,6 +103,15 @@ struct Shared {
     MGC::CanvasBitmap lastFrame{ nullptr };
     std::vector<uint8_t> shader;
     ULONGLONG lastFrameMs = 0;     // throttle del pipeline a ~30 fps
+    // El primer frame de una sesión recién abierta NO se descarta por
+    // throttle: es justo el que estamos esperando para refrescar.
+    bool awaitingFirstFrame = false;
+    // Modo "caliente": mientras el escritorio cambia (alt+tab, minimizar,
+    // abrir ventanas) la sesión de captura se queda VIVA, así el siguiente
+    // refresco es inmediato en vez de reconstruir el framepool entero.
+    // Al calmarse, se cierra y volvemos a ser visibles en screen share.
+    ULONGLONG hotUntilMs = 0;
+    UINT_PTR coolTimer = 0;
 
     // Refresco por eventos del escritorio (en vez de recapturar al mover).
     HWINEVENTHOOK hookSystem = nullptr;      // foreground, move/size, minimize
@@ -264,6 +275,10 @@ void ReleaseLensGraph(Lens& l) {
     l.fxGlass = nullptr;
 }
 
+// Declaradas antes porque el callback de FrameArrived las usa.
+void StopCaptureKeepFrame();
+void CALLBACK CoolDownTimerProc(HWND, UINT, UINT_PTR, DWORD);
+
 bool StartCaptureForMonitor(HMONITOR monitor) {
     Lens* primary = FirstLens();
     if (!primary) return false;
@@ -311,8 +326,12 @@ bool StartCaptureForMonitor(HMONITOR monitor) {
             // Throttle: el escritorio puede entregar frames a 144 Hz
             // (wallpaper animado, video). Para un fondo de cristal, 30 fps
             // son indistinguibles y cuestan una fracción.
+            // EXCEPCIÓN: el primer frame de una sesión recién abierta jamás
+            // se descarta — es el que estamos esperando para refrescar, y
+            // tirarlo añadía 33 ms+ de imagen vieja en cada cambio.
             const ULONGLONG now = GetTickCount64();
-            if (now - g.lastFrameMs < 33) return;
+            if (!g.awaitingFirstFrame && now - g.lastFrameMs < 33) return;
+            g.awaitingFirstFrame = false;
             g.lastFrameMs = now;
 
             try {
@@ -343,15 +362,22 @@ bool StartCaptureForMonitor(HMONITOR monitor) {
                         cds.Close();
                     }
                     g.lastFrame = copy;
-                    // Snapshot tomado: cerrar captura y volver a ser VISIBLES
-                    // en capturas/screen share. El snapshot sigue siendo
-                    // válido aunque las ventanas se muevan — solo se
-                    // refresca cuando cambia el FONDO (ver los WinEventHook).
-                    g.frameRevoker.revoke();
-                    if (g.session) { g.session.Close(); g.session = nullptr; }
-                    if (g.framePool) { g.framePool.Close(); g.framePool = nullptr; }
-                    g.item = nullptr;
-                    SetLensesCaptureAffinity(false);
+                    // Snapshot tomado. Si el escritorio SIGUE cambiando
+                    // (modo caliente) la sesión se queda viva: reconstruir
+                    // el framepool —dos texturas del tamaño del monitor—
+                    // en cada alt+tab era el grueso del retraso. Cuando se
+                    // calma, el temporizador de enfriado la cierra y
+                    // volvemos a ser visibles en screen share.
+                    if (now < g.hotUntilMs) {
+                        if (g.coolTimer) KillTimer(nullptr, g.coolTimer);
+                        g.coolTimer = SetTimer(
+                            nullptr, 0,
+                            static_cast<UINT>(g.hotUntilMs - now) + 30,
+                            CoolDownTimerProc);
+                    } else {
+                        StopCaptureKeepFrame();
+                        SetLensesCaptureAffinity(false);
+                    }
                 } else {
                     g.lastFrame = wrapped;
                 }
@@ -365,16 +391,46 @@ bool StartCaptureForMonitor(HMONITOR monitor) {
             }
         });
 
+    g.awaitingFirstFrame = true;   // no descartar el frame que esperamos
     g.session.StartCapture();
     g.monitor = monitor;
     return true;
 }
 
-void StopCapture() {
+// Cierra la sesión de captura pero CONSERVA el snapshot y los grafos: es
+// el final normal de un ciclo (ya tenemos la foto, soltamos la cámara).
+void StopCaptureKeepFrame() {
     g.frameRevoker.revoke();
     if (g.session) { g.session.Close(); g.session = nullptr; }
     if (g.framePool) { g.framePool.Close(); g.framePool = nullptr; }
     g.item = nullptr;
+    g.awaitingFirstFrame = false;
+}
+
+// Fin del modo caliente: si ya no llegan cambios, soltar la cámara y
+// volver a ser visibles en screen share.
+void CALLBACK CoolDownTimerProc(HWND, UINT, UINT_PTR id, DWORD) {
+    KillTimer(nullptr, id);
+    g.coolTimer = 0;
+    if (!g.active) return;
+
+    const ULONGLONG now = GetTickCount64();
+    if (now < g.hotUntilMs) {   // llegaron más cambios: seguir caliente
+        g.coolTimer = SetTimer(nullptr, 0,
+                               static_cast<UINT>(g.hotUntilMs - now) + 30,
+                               CoolDownTimerProc);
+        return;
+    }
+    if (g.shareFriendly) {
+        StopCaptureKeepFrame();
+        SetLensesCaptureAffinity(false);
+    }
+}
+
+void StopCapture() {
+    StopCaptureKeepFrame();
+    if (g.coolTimer) { KillTimer(nullptr, g.coolTimer); g.coolTimer = 0; }
+    g.hotUntilMs = 0;
     g.monitor = nullptr;
     g.lastFrame = nullptr;
     // El grafo referencia recursos del device: soltarlo también.
@@ -425,6 +481,11 @@ void ScheduleRecapture(bool discrete) {
     // Nada visible → ni siquiera armar el temporizador. El evento que nos
     // destape volverá a llamar aquí.
     if (!AnyLensNeedsWork()) return;
+
+    // El escritorio está cambiando: mantener viva la cámara un rato para
+    // que los siguientes cambios se reflejen al instante.
+    g.hotUntilMs = GetTickCount64() + kHotWindowMs;
+    if (g.session) return;   // sesión viva: los frames ya están llegando
 
     if (discrete) {
         // Rápido: el cristal está mostrando una ventana que ya no está ahí.
@@ -493,6 +554,8 @@ void RemoveEventHooks() {
     if (g.hookLocation) { UnhookWinEvent(g.hookLocation); g.hookLocation = nullptr; }
     if (g.recaptureTimer) { KillTimer(nullptr, g.recaptureTimer); g.recaptureTimer = 0; }
     if (g.settleTimer) { KillTimer(nullptr, g.settleTimer); g.settleTimer = 0; }
+    if (g.coolTimer) { KillTimer(nullptr, g.coolTimer); g.coolTimer = 0; }
+    g.hotUntilMs = 0;
 }
 
 void OnDraw(MGCX::CanvasControl const& sender, MGCX::CanvasDrawEventArgs const& args) {
