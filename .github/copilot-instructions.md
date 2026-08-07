@@ -40,6 +40,13 @@ Include dirs (orden importa): `$(ProjectDir)` → `$(IntDir)` → `$(IntDir)Gene
 - **LNK2001 `InitializeComponent`/`Connect`/`GetBindingConnector`** → el `.g.hpp` de `$(IntDir)` no se compiló. `XamlGeneratedBodies.cpp` debe incluirlos y el target `_XamlPass2BeforeClCompile` de `Directory.Build.targets` debe estar intacto.
 - **Se añadió/renombró un `x:Name` o handler en `MainWindow.xaml`** → sincronizar a mano `Generated Files\MainWindow.xaml.g.h`: un accessor par (get/set) + campo `_Nombre{nullptr}` del tipo correcto. Los connection IDs del `.g.hpp` se regeneran solos.
 - **Error de tipos duplicados XamlTypeInfo** → probablemente alguien añadió `$(IntDir)XamlTypeInfo.g.cpp` Y una copia en raíz. Solo debe compilarse el de `$(IntDir)`.
+- **`midl : command line error MIDL1003: error returned by the C preprocessor (2)`**
+  → NO es un error de código: falta el restore de NuGet. Pasa siempre después
+  de borrar `MuteMic\` (el `$(IntDir)`) o de un clone limpio, porque los
+  targets de CppWinRT/WindowsAppSDK que configuran MIDL viven en el cache de
+  paquetes. Fix: `msbuild MuteMic.sln /t:Restore /p:Platform=x64` y volver a
+  compilar. Regla práctica: **tras cualquier limpieza profunda, siempre
+  `/t:Restore` antes del build.**
 - **`Windows App Runtime no encontrado` al ejecutar** → `winget install Microsoft.WindowsAppRuntime.1.6` (es framework-dependent).
 - **Mojibake en strings (Ã³, â€")** → falta `/utf-8` en las opciones del compilador. Está en `AdditionalOptions`; no quitarlo.
 
