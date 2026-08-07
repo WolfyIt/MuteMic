@@ -236,20 +236,29 @@ bool StartCaptureForMonitor(HMONITOR monitor) {
 
             try {
                 const bool first = (g.lastFrame == nullptr);
+                // DPI del canvas, NO 96 fijo: si el bitmap y el destino
+                // tienen DPI distinto, D2D mete un DpiCompensationEffect que
+                // reescala TODO el fondo con filtro bilineal — el texto de
+                // atrás se ve suave incluso en el centro de la ventana.
+                const float dpi = primary->canvas.Dpi();
                 auto wrapped = MGC::CanvasBitmap::CreateFromDirect3D11Surface(
-                    primary->canvas.Device(), frame.Surface());
+                    primary->canvas.Device(), frame.Surface(), dpi);
 
                 if (g.shareFriendly) {
                     // COPIA real del frame (el buffer del pool se recicla al
                     // cerrar la captura; un wrap colgaría de memoria muerta).
+                    // Mismo DPI y tamaño en píxeles idéntico → copia 1:1.
+                    const float wpx = static_cast<float>(wrapped.SizeInPixels().Width);
+                    const float hpx = static_cast<float>(wrapped.SizeInPixels().Height);
                     MGC::CanvasRenderTarget copy(
                         primary->canvas.Device(),
-                        static_cast<float>(wrapped.SizeInPixels().Width),
-                        static_cast<float>(wrapped.SizeInPixels().Height),
-                        96.0f);
+                        wpx * 96.0f / dpi, hpx * 96.0f / dpi, dpi);
                     {
                         auto cds = copy.CreateDrawingSession();
-                        cds.DrawImage(wrapped);
+                        cds.Units(MGC::CanvasUnits::Pixels);
+                        cds.DrawImage(wrapped,
+                                      winrt::Windows::Foundation::Rect(0, 0, wpx, hpx),
+                                      winrt::Windows::Foundation::Rect(0, 0, wpx, hpx));
                         cds.Close();
                     }
                     g.lastFrame = copy;
@@ -440,6 +449,12 @@ void OnDraw(MGCX::CanvasControl const& sender, MGCX::CanvasDrawEventArgs const& 
         if (!lens->fxGlass || lens->graphIsFrost != g.frost) {
             stage = "build graph";
             lens->fxShift = MGC::Effects::Transform2DEffect();
+            // NEAREST + traslación entera = copia texel a texel. Con el
+            // filtro bilineal por defecto, cualquier residuo fraccionario
+            // suaviza TODO el fondo (incluido el centro de la ventana, donde
+            // el shader no distorsiona nada). El desenfoque del modo frost
+            // se sigue aplicando después, en su propia rama del grafo.
+            lens->fxShift.InterpolationMode(MGC::CanvasImageInterpolation::NearestNeighbor);
 
             winrt::Windows::Graphics::Effects::IGraphicsEffectSource src = lens->fxShift;
             if (P.blurPx > 0.1f) {
