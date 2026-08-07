@@ -404,41 +404,49 @@ namespace winrt::MuteMic::implementation
         // Glass: los rows heredan tema claro para el hover correcto.
         m_flyRoot.RequestedTheme(theme == 1 ? ElementTheme::Light : ElementTheme::Dark);
 
-        // ── Liquid Glass real en el flyout ──
+        EnsureFlyoutGlass(theme);
+    }
+
+    // Decide en CADA apertura si el flyout usa cristal real o acrylic.
+    // Vive fuera de BuildTrayFlyout a propósito: aquella sale temprano si el
+    // flyout ya estaba construido, y entonces un flyout creado antes de que
+    // el glass estuviera activo se quedaba con el acrylic viejo para siempre.
+    void App::EnsureFlyoutGlass(UINT theme)
+    {
+        if (!m_flyout) return;
+
         // Con glass activo el flyout se registra como LENTE del backdrop:
         // comparte el snapshot del monitor y pinta su propia región con el
         // shader de refracción. El acrylic se apaga (sería una capa encima
-        // del cristal) y el fondo del root se vuelve casi transparente para
-        // que el cristal se vea.
-        const bool glassMode = s.glass && mutemic::LiquidGlassBackdrop::IsActive();
+        // del cristal).
+        const bool glassMode = MuteMicCore::Get().GetSettings().glass &&
+                               mutemic::LiquidGlassBackdrop::IsActive();
+
         if (HWND flyHwnd = HwndOf(m_flyout))
         {
-            if (glassMode)
+            if (glassMode && m_flyStack)
                 mutemic::LiquidGlassBackdrop::AttachLens(flyHwnd, m_flyStack);
             else
                 mutemic::LiquidGlassBackdrop::DetachLens(flyHwnd);
         }
 
-        // Tinte del acrylic acorde al modo (apagado cuando hay cristal).
-        if (m_flyAcrylic)
-        {
-            const bool light = (theme == 1);
-            if (glassMode) {
-                // Cristal real detrás: el acrylic solo estorbaría.
-                m_flyAcrylic.TintOpacity(0.0f);
-                m_flyAcrylic.LuminosityOpacity(0.0f);
-                m_flyAcrylic.TintColor(Argb(0x00, 0, 0, 0));
-            } else if (light) {
-                m_flyAcrylic.TintColor(Argb(0xFF, 246, 247, 250));
-                m_flyAcrylic.TintOpacity(0.70f);
-                m_flyAcrylic.LuminosityOpacity(0.85f);
-                m_flyAcrylic.FallbackColor(Argb(0xFF, 240, 242, 246));
-            } else {
-                m_flyAcrylic.TintColor(Argb(0xFF, 12, 13, 16));
-                m_flyAcrylic.TintOpacity(0.75f);
-                m_flyAcrylic.LuminosityOpacity(0.90f);
-                m_flyAcrylic.FallbackColor(Argb(0xFF, 14, 15, 18));
-            }
+        if (!m_flyAcrylic) return;
+        const bool light = (theme == 1);
+        if (glassMode) {
+            // Cristal real detrás: el acrylic solo estorbaría.
+            m_flyAcrylic.TintOpacity(0.0f);
+            m_flyAcrylic.LuminosityOpacity(0.0f);
+            m_flyAcrylic.TintColor(Argb(0x00, 0, 0, 0));
+        } else if (light) {
+            m_flyAcrylic.TintColor(Argb(0xFF, 246, 247, 250));
+            m_flyAcrylic.TintOpacity(0.70f);
+            m_flyAcrylic.LuminosityOpacity(0.85f);
+            m_flyAcrylic.FallbackColor(Argb(0xFF, 240, 242, 246));
+        } else {
+            m_flyAcrylic.TintColor(Argb(0xFF, 12, 13, 16));
+            m_flyAcrylic.TintOpacity(0.75f);
+            m_flyAcrylic.LuminosityOpacity(0.90f);
+            m_flyAcrylic.FallbackColor(Argb(0xFF, 14, 15, 18));
         }
     }
 
@@ -522,6 +530,9 @@ namespace winrt::MuteMic::implementation
         m_flyout.AppWindow().MoveAndResize({ x, y, w, h });
         m_flyout.AppWindow().Show();
         m_flyout.Activate();
+        // Después de Show: la lente necesita la ventana YA visible (el
+        // display affinity y el invalidate se saltan ventanas ocultas).
+        EnsureFlyoutGlass(MuteMicCore::Get().GetSettings().theme);
         g_flyHwnd = hwnd;
         InstallFlyoutMouseHook();
         // La lente lee la posición de la ventana al dibujar: repintar DESPUÉS

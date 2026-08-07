@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "LiquidGlassBackdrop.h"
 
+#include <algorithm>
 #include <d3d11.h>
 #include <fstream>
 #include <vector>
@@ -58,8 +59,22 @@ struct Lens {
     MGC::Effects::PixelShaderEffect fxGlass{ nullptr };
     bool graphIsFrost = false;
 
+    // ── Predicción de movimiento (late-stage reprojection) ──
+    // El marco de la ventana lo mueve DWM al instante; nuestro frame se
+    // presenta 1-2 frames después. Muestrear la posición actual deja el
+    // cristal atrasado en arrastres rápidos. Se estima la velocidad y se
+    // muestrea donde la ventana ESTARÁ al presentarse el frame.
+    POINT lastTopLeft{ 0, 0 };
+    LARGE_INTEGER lastPosQpc{};
+    float velX = 0.0f, velY = 0.0f;   // px por ms
+
     bool InUse() const { return hwnd != nullptr; }
 };
+
+// Latencia estimada del pipeline (invalidate → draw → present).
+constexpr float kPredictMs = 14.0f;
+// Tope de corrección: evita saltos absurdos si la estimación se dispara.
+constexpr float kPredictMaxPx = 140.0f;
 
 // ── Estado COMPARTIDO: una captura para todas las lentes ──
 struct Shared {
@@ -146,14 +161,17 @@ std::vector<uint8_t> LoadShaderBlob() {
 // túnel infinito.
 void SetLensesCaptureAffinity(bool exclude) {
     for (auto& l : g.lenses)
-        if (l.hwnd)
+        // SOLO ventanas visibles: tocar el display affinity de una ventana
+        // oculta (el flyout en reposo) fuerza una re-composición que la hace
+        // parpadear en pantalla — el "fantasma del tray" al cambiar de app.
+        if (l.hwnd && IsWindowVisible(l.hwnd))
             SetWindowDisplayAffinity(l.hwnd,
                                      exclude ? WDA_EXCLUDEFROMCAPTURE : WDA_NONE);
 }
 
 void InvalidateAllLenses() {
     for (auto& l : g.lenses)
-        if (l.canvas) l.canvas.Invalidate();
+        if (l.canvas && l.hwnd && IsWindowVisible(l.hwnd)) l.canvas.Invalidate();
 }
 
 void ReleaseLensGraph(Lens& l) {
@@ -377,8 +395,36 @@ void OnDraw(MGCX::CanvasControl const& sender, MGCX::CanvasDrawEventArgs const& 
     const int w = cr.right, h = cr.bottom;
     if (w <= 0 || h <= 0) return;
 
-    const float ox = static_cast<float>(tl.x - mi.rcMonitor.left);
-    const float oy = static_cast<float>(tl.y - mi.rcMonitor.top);
+    // ── Late-stage reprojection ──
+    // DWM ya movió el marco; este frame se verá ~kPredictMs después. Se
+    // estima la velocidad de la ventana y se muestrea la zona donde ESTARÁ
+    // al presentarse, no donde está al dibujar. Sin esto el cristal se
+    // arrastra visiblemente en movimientos rápidos.
+    LARGE_INTEGER now{}, freq{};
+    QueryPerformanceCounter(&now);
+    QueryPerformanceFrequency(&freq);
+    float predX = 0.0f, predY = 0.0f;
+    if (lens->lastPosQpc.QuadPart != 0) {
+        const float dtMs = static_cast<float>(now.QuadPart - lens->lastPosQpc.QuadPart)
+                           * 1000.0f / static_cast<float>(freq.QuadPart);
+        if (dtMs > 0.5f && dtMs < 120.0f) {
+            const float instX = (tl.x - lens->lastTopLeft.x) / dtMs;
+            const float instY = (tl.y - lens->lastTopLeft.y) / dtMs;
+            // Suavizado exponencial: el ruido de un frame suelto no debe
+            // hacer saltar la lente.
+            lens->velX = lens->velX * 0.45f + instX * 0.55f;
+            lens->velY = lens->velY * 0.45f + instY * 0.55f;
+        } else if (dtMs >= 120.0f) {
+            lens->velX = lens->velY = 0.0f;   // quieta: sin predicción
+        }
+        predX = std::clamp(lens->velX * kPredictMs, -kPredictMaxPx, kPredictMaxPx);
+        predY = std::clamp(lens->velY * kPredictMs, -kPredictMaxPx, kPredictMaxPx);
+    }
+    lens->lastTopLeft = tl;
+    lens->lastPosQpc = now;
+
+    const float ox = static_cast<float>(tl.x - mi.rcMonitor.left) + predX;
+    const float oy = static_cast<float>(tl.y - mi.rcMonitor.top) + predY;
     const GlassParams& P = g.frost ? kFrosted : kClear;
 
     const char* stage = "start";

@@ -20,6 +20,8 @@ namespace winrt::MuteMic::implementation
     private:
         void BuildTrayFlyout();
         void RefreshTrayFlyout();
+        // Cristal real vs acrylic en el flyout; se re-evalúa en cada apertura.
+        void EnsureFlyoutGlass(UINT theme);
 
         winrt::Microsoft::UI::Xaml::Window m_window{ nullptr };
 
