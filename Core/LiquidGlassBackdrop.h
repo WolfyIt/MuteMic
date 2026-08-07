@@ -61,6 +61,13 @@ public:
     static void OnWindowVisibility(bool visible);
 
     static bool IsActive();
+
+    // ¿La ventana está COMPLETAMENTE tapada por otra (no solo oculta)?
+    // Una ventana tapada no debe costar nada: ni captura, ni shader, ni
+    // repintados por frame. Barato: recorre el Z-order por encima y busca
+    // una ventana ajena que la contenga entera. Pensado para llamarse en
+    // eventos (cambio de foco, mover, minimizar), no por frame.
+    static bool IsWindowOccluded(HWND hwnd);
 };
 
 }  // namespace mutemic

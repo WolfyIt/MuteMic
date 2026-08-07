@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <d3d11.h>
+#include <dwmapi.h>
 #include <fstream>
 #include <vector>
 
@@ -170,6 +171,51 @@ std::vector<uint8_t> LoadShaderBlob() {
 // Excluir/incluir TODAS nuestras ventanas de la captura: si una lente
 // aparece en el snapshot que ella misma muestrea, se produce el efecto
 // túnel infinito.
+// ¿Hay una ventana ajena que cubra ENTERA a esta? Recorre el Z-order hacia
+// arriba (GW_HWNDPREV = más cerca del frente). No hace unión de regiones a
+// propósito: el caso que importa —y el único barato de calcular— es "una
+// ventana grande encima", que es el 95% de los casos reales.
+bool WindowIsCovered(HWND hwnd) {
+    if (!hwnd || !IsWindowVisible(hwnd) || IsIconic(hwnd)) return true;
+    RECT self{};
+    if (!GetWindowRect(hwnd, &self)) return false;
+    if (self.right <= self.left || self.bottom <= self.top) return true;
+
+    for (HWND h = GetWindow(hwnd, GW_HWNDPREV); h; h = GetWindow(h, GW_HWNDPREV)) {
+        if (!IsWindowVisible(h) || IsIconic(h)) continue;
+
+        DWORD pid = 0;
+        GetWindowThreadProcessId(h, &pid);
+        if (pid == GetCurrentProcessId()) continue;   // nuestras ventanas
+
+        // Cloaked = existe pero no se dibuja (UWP suspendidas, escritorios
+        // virtuales). Taparía "en papel" sin tapar en pantalla.
+        BOOL cloaked = FALSE;
+        if (SUCCEEDED(DwmGetWindowAttribute(h, DWMWA_CLOAKED, &cloaked,
+                                            sizeof(cloaked))) && cloaked)
+            continue;
+
+        // Ventanas click-through / overlays no cuentan como tapar.
+        const LONG_PTR ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
+        if (ex & WS_EX_TRANSPARENT) continue;
+
+        RECT r{};
+        if (!GetWindowRect(h, &r)) continue;
+        if (r.left <= self.left && r.top <= self.top &&
+            r.right >= self.right && r.bottom >= self.bottom)
+            return true;
+    }
+    return false;
+}
+
+// ¿Alguna lente merece trabajo? (visible Y no tapada)
+bool AnyLensNeedsWork() {
+    for (auto& l : g.lenses)
+        if (l.InUse() && IsWindowVisible(l.hwnd) && !WindowIsCovered(l.hwnd))
+            return true;
+    return false;
+}
+
 void SetLensesCaptureAffinity(bool exclude) {
     for (auto& l : g.lenses)
         // SOLO ventanas visibles: tocar el display affinity de una ventana
@@ -181,8 +227,12 @@ void SetLensesCaptureAffinity(bool exclude) {
 }
 
 void InvalidateAllLenses() {
-    for (auto& l : g.lenses)
-        if (l.canvas && l.hwnd && IsWindowVisible(l.hwnd)) l.canvas.Invalidate();
+    for (auto& l : g.lenses) {
+        if (!l.canvas || !l.hwnd || !IsWindowVisible(l.hwnd)) continue;
+        // Tapada por otra ventana: no gastar shader en píxeles invisibles.
+        if (WindowIsCovered(l.hwnd)) continue;
+        l.canvas.Invalidate();
+    }
 }
 
 void ReleaseLensGraph(Lens& l) {
@@ -310,11 +360,13 @@ void StopCapture() {
     for (auto& l : g.lenses) ReleaseLensGraph(l);
 }
 
-// ¿Hay alguna lente visible? (la principal puede estar en el tray mientras
-// el flyout SÍ se ve: ahí el cristal se sigue necesitando).
+// ¿Hay alguna lente que de verdad se vea? (la principal puede estar en el
+// tray mientras el flyout SÍ se ve: ahí el cristal se sigue necesitando).
 Lens* FirstVisibleLens() {
     for (auto& l : g.lenses)
-        if (l.InUse() && l.canvas && IsWindowVisible(l.hwnd)) return &l;
+        if (l.InUse() && l.canvas && IsWindowVisible(l.hwnd) &&
+            !WindowIsCovered(l.hwnd))
+            return &l;
     return nullptr;
 }
 
@@ -323,7 +375,10 @@ void DoRecapture() {
     if (!g.active) return;
     if (g.session) return;                  // ya hay un ciclo en curso
     Lens* visible = FirstVisibleLens();
-    if (!visible) return;                   // todo oculto: no gastar GPU
+    // Oculta en el tray o tapada por otra ventana: el cristal no se ve,
+    // capturar el monitor sería gasto puro. Al destaparse llega un evento
+    // (foreground/minimize) que dispara la recaptura.
+    if (!visible) return;
 
     SetLensesCaptureAffinity(true);
     StartCaptureForMonitor(MonitorFromWindow(visible->hwnd, MONITOR_DEFAULTTONEAREST));
@@ -340,6 +395,9 @@ void CALLBACK RecaptureTimerProc(HWND, UINT, UINT_PTR id, DWORD) {
 // continuous = algo se está moviendo y seguirán llegando eventos.
 void ScheduleRecapture(bool discrete) {
     if (!g.active || !g.shareFriendly) return;
+    // Nada visible → ni siquiera armar el temporizador. El evento que nos
+    // destape volverá a llamar aquí.
+    if (!AnyLensNeedsWork()) return;
 
     if (discrete) {
         // Rápido: el cristal está mostrando una ventana que ya no está ahí.
@@ -769,6 +827,23 @@ void LiquidGlassBackdrop::OnWindowVisibility(bool visible) {
 
 bool LiquidGlassBackdrop::IsActive() {
     return g.active;
+}
+
+bool LiquidGlassBackdrop::IsWindowOccluded(HWND hwnd) {
+    // Cache con TTL: recorrer el Z-order es barato, pero no a 165 Hz. Los
+    // llamadores por frame (la barra de nivel) obtienen una respuesta de
+    // hace <=180 ms, que para decidir "¿alguien me tapa?" sobra.
+    static HWND cachedHwnd = nullptr;
+    static ULONGLONG cachedMs = 0;
+    static bool cachedResult = false;
+
+    const ULONGLONG now = GetTickCount64();
+    if (hwnd != cachedHwnd || now - cachedMs > 180) {
+        cachedHwnd = hwnd;
+        cachedMs = now;
+        cachedResult = WindowIsCovered(hwnd);
+    }
+    return cachedResult;
 }
 
 }  // namespace mutemic

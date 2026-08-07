@@ -62,6 +62,9 @@ namespace winrt::MuteMic::implementation
         winrt::Microsoft::UI::Composition::SystemBackdrops::DesktopAcrylicController m_acrylic{ nullptr };
         winrt::Microsoft::UI::Composition::SystemBackdrops::SystemBackdropConfiguration m_backdropConfig{ nullptr };
         winrt::Microsoft::UI::Xaml::Media::CompositionTarget::Rendering_revoker m_renderHook{};
+        // HWND cacheado: el hook de render corre por frame y resolverlo con
+        // try_as<IWindowNative> cada vez sería gasto tonto.
+        HWND m_hwnd{ nullptr };
 
         // Presencia (cards de gamepad se atenúan sin pad conectado).
         std::vector<std::pair<size_t, winrt::Microsoft::UI::Xaml::Controls::Border>> m_padCards;

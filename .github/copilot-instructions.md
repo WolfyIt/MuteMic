@@ -92,6 +92,19 @@ Fallos probables y sus fixes:
   (`ScheduleRecapture`). Eso arregla el "frame congelado" sin costo en reposo.
 - El host de una lente puede cambiar (el flyout se reconstruye entero al
   cambiar de tema): `AttachLens` detecta el host nuevo y muda el canvas.
+- **Una ventana TAPADA no debe costar nada.** `WindowIsCovered()` recorre el
+  Z-order hacia arriba buscando una ventana ajena que la contenga entera
+  (saltando cloaked, `WS_EX_TRANSPARENT` y las nuestras). Con eso se corta
+  captura, shader y repintados. `IsWindowOccluded()` es la versión pública
+  con cache de 180 ms para los llamadores POR FRAME (la barra de nivel).
+  Estar "visible" (`IsWindowVisible`) NO significa que se vea.
+- La nitidez del fondo depende de tres cosas juntas, no romper ninguna:
+  offset redondeado a píxel entero, `InterpolationMode` NearestNeighbor en
+  `fxShift`, y el bitmap del snapshot creado con el DPI del canvas (con 96
+  fijo, D2D mete un `DpiCompensationEffect` que reescala todo con bilineal).
+- La lente muestrea con **predicción de movimiento** (velocidad × latencia,
+  suavizada y acotada): sin eso el cristal se arrastra en movimientos
+  rápidos, porque el marco lo mueve DWM y nuestro frame llega 1-2 después.
 - **REGLA DE ORO de compositores**: `CompositionTarget::GetCompositorForCurrentThread()`
   devuelve un `Microsoft::UI::Composition::Compositor`. NUNCA castearlo a
   `Windows::UI::Composition::Compositor` (QI falla y el catch degrada a

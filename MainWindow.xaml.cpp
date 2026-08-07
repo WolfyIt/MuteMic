@@ -58,6 +58,8 @@ namespace winrt::MuteMic::implementation
     MainWindow::MainWindow()
     {
         InitializeComponent();
+        if (auto native = this->try_as<::IWindowNative>())
+            native->get_WindowHandle(&m_hwnd);
         SetupWindowChrome();
         SetupBackdrop();
 
@@ -130,7 +132,13 @@ namespace winrt::MuteMic::implementation
             // Guard de teardown: este evento es estático y puede disparar
             // mientras la ventana muere (era una fuente del 0xC0000005).
             if (MuteMicCore::Exiting()) return;
-            if (AppWindow() && AppWindow().IsVisible()) UpdateLevelBar();
+            if (!AppWindow() || !AppWindow().IsVisible()) return;
+            // Tapada por otra ventana: la barra de nivel no se ve, así que
+            // no vale leer el pico ni tocar el transform 165 veces por
+            // segundo. (El icono del tray se sigue actualizando aparte.)
+            if (m_hwnd && mutemic::LiquidGlassBackdrop::IsWindowOccluded(m_hwnd))
+                return;
+            UpdateLevelBar();
         });
     }
 
