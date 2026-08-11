@@ -127,12 +127,42 @@ void DumpEnvironment() {
     EnumDisplayMonitors(nullptr, nullptr, MonitorEnumProc, 0);
     DumpAdapter();
 
+    // SELLO DE BUILD. Sin esto es imposible saber si un log salió del
+    // binario que se acaba de compilar o de uno viejo que seguía corriendo
+    // — y se acaba diagnosticando síntomas ya arreglados.
+    // __DATE__/__TIME__ es el momento de COMPILAR este archivo; la fecha
+    // del exe es la del enlazado. Si no coinciden, algo no se recompiló.
+    {
+        wchar_t exePath[MAX_PATH] = {};
+        GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+        WIN32_FILE_ATTRIBUTE_DATA fad{};
+        SYSTEMTIME st{};
+        if (GetFileAttributesExW(exePath, GetFileExInfoStandard, &fad)) {
+            FILETIME local{};
+            FileTimeToLocalFileTime(&fad.ftLastWriteTime, &local);
+            FileTimeToSystemTime(&local, &st);
+        }
+        char buf[256];
+        sprintf_s(buf,
+                  "config=%s compiled=\"%s %s\" exe_linked=%04u-%02u-%02u %02u:%02u:%02u",
 #ifdef NDEBUG
-    WriteLine("ENV", "build", "config=Release");
+                  "Release",
 #else
-    WriteLine("ENV", "build", "config=Debug");
+                  "Debug",
 #endif
-    WriteLine("ENV", "cmdline", nullptr);
+                  __DATE__, __TIME__,
+                  st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+        WriteLine("ENV", "build", buf);
+    }
+
+    {
+        // Línea de comandos completa: distingue daemon de --settings y
+        // deja ver si venía con --diag o con un verbo del CLI.
+        char cmd[512] = "";
+        WideCharToMultiByte(CP_UTF8, 0, GetCommandLineW(), -1, cmd, sizeof(cmd),
+                            nullptr, nullptr);
+        WriteLine("ENV", "cmdline", cmd);
+    }
 }
 
 }  // namespace
