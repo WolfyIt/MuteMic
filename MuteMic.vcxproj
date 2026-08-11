@@ -135,6 +135,7 @@
     <ClCompile Include="Core\IconRenderer.cpp" />
     <ClCompile Include="Core\LiquidGlassBackdrop.cpp" />
     <ClCompile Include="Core\MuteMicCore.cpp" />
+    <ClCompile Include="Core\NativeFlyout.cpp" />
     <ClCompile Include="Core\SettingsStore.cpp" />
     <ClCompile Include="Core\Telemetry.cpp" />
     <ClCompile Include="Core\TrayIcon.cpp" />
@@ -161,6 +162,7 @@
     <ClInclude Include="Core\IconRenderer.h" />
     <ClInclude Include="Core\LiquidGlassBackdrop.h" />
     <ClInclude Include="Core\MuteMicCore.h" />
+    <ClInclude Include="Core\NativeFlyout.h" />
     <ClInclude Include="Core\SettingsStore.h" />
     <ClInclude Include="Core\Telemetry.h" />
     <ClInclude Include="Core\TrayIcon.h" />

@@ -12,6 +12,7 @@
 #include "Autostart.h"
 #include "IconRenderer.h"
 #include "LiquidGlassBackdrop.h"
+#include "NativeFlyout.h"
 #include "Telemetry.h"
 #include "VisualCue.h"
 
@@ -129,6 +130,7 @@ void MuteMicCore::Term() {
         for (size_t i = 0; i < settings_.shortcuts.size(); ++i)
             UnregisterHotKey(hwnd_, kRegisteredHotkeyBase + static_cast<int>(i));
     }
+    NativeFlyout::Term();
     VisualCue::Term();
     HotkeyHook::UninstallMouse();
     HotkeyHook::Uninstall();
@@ -335,7 +337,12 @@ LRESULT MuteMicCore::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
                 case WM_RBUTTONUP: {
                     POINT pt;
                     GetCursorPos(&pt);
-                    if (onTrayFlyout) {
+                    // Flyout NATIVO: vive en el núcleo Win32, sin XAML.
+                    // Es la superficie de uso diario, así que no puede ser
+                    // la que obligue a cargar el runtime pesado.
+                    if (ShowNativeFlyout(pt.x, pt.y)) {
+                        // servido
+                    } else if (onTrayFlyout) {
                         onTrayFlyout(pt.x, pt.y);
                     } else {
                         UINT cmd = tray_->ShowMenu(IsAutostartEnabled(), servicePaused_);
@@ -550,6 +557,46 @@ void MuteMicCore::OnWindowHidden() {
     // exactamente el "se va acumulando" reportado. Se re-arma solo mientras
     // la ventana siga oculta.
     SetTimer(hwnd_, kTrimTimerId, 900, nullptr);
+}
+
+bool MuteMicCore::ShowNativeFlyout(int x, int y) {
+    NativeFlyout::Model m;
+    m.muted = (State() == MicState::Muted);
+    m.serviceActive = !servicePaused_;
+    m.deviceName = CurrentDeviceName();
+    m.theme = settings_.theme;
+    m.glass = settings_.glass;
+
+    const auto devices = AudioController::Enumerate();
+    const std::wstring current = settings_.deviceId;
+    for (auto const& d : devices) {
+        NativeFlyout::DeviceEntry e;
+        e.name = d.name;
+        e.id = d.id;
+        // Sin deviceId guardado se está usando el predeterminado del
+        // sistema, que es el primero que devuelve la enumeración.
+        e.current = current.empty() ? (&d == &devices.front()) : (d.id == current);
+        m.devices.push_back(std::move(e));
+    }
+
+    NativeFlyout::Show(x, y, m, [this, devices](NativeFlyout::Action a, int payload) {
+        switch (a) {
+            case NativeFlyout::Action::ToggleMute:
+                ToggleMute();
+                break;
+            case NativeFlyout::Action::OpenSettings:
+                if (onOpenSettings) onOpenSettings();
+                break;
+            case NativeFlyout::Action::Quit:
+                RequestExit();
+                break;
+            case NativeFlyout::Action::SelectDevice:
+                if (payload >= 0 && static_cast<size_t>(payload) < devices.size())
+                    SetDeviceId(devices[payload].id);
+                break;
+        }
+    });
+    return NativeFlyout::IsOpen();
 }
 
 void MuteMicCore::OnWindowShown() {

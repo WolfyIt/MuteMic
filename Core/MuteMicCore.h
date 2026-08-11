@@ -95,6 +95,9 @@ private:
     LRESULT HandleMessage(HWND, UINT, WPARAM, LPARAM);
 
     void RefreshTray();
+    // Arma el modelo y abre el flyout nativo. false si no se pudo (falta
+    // D3D/D2D): entonces se cae al menú clásico.
+    bool ShowNativeFlyout(int x, int y);
     void UpdateMeterTimer();
     std::wstring BuildTooltip();
     void NotifyStateChanged();
