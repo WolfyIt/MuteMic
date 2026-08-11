@@ -200,14 +200,40 @@ LRESULT MuteMicCore::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             const bool valid =
                 idx >= 0 && static_cast<size_t>(idx) < settings_.shortcuts.size();
             {
-                char buf[128];
-                sprintf_s(buf, "idx=%d valid=%d paused=%d mode=%u",
+                // QUIÉN tenía el foco al llegar el atajo. Sin esto no se
+                // puede distinguir "no llegó sobre una app elevada" de
+                // "llegó y muteó, pero no se vio" — que es justo la duda.
+                wchar_t fgExe[MAX_PATH] = L"?";
+                DWORD fgPid = 0;
+                if (HWND fg = GetForegroundWindow()) {
+                    GetWindowThreadProcessId(fg, &fgPid);
+                    if (HANDLE p = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,
+                                               FALSE, fgPid)) {
+                        DWORD n = MAX_PATH;
+                        QueryFullProcessImageNameW(p, 0, fgExe, &n);
+                        CloseHandle(p);
+                    }
+                }
+                const wchar_t* base = wcsrchr(fgExe, L'\\');
+                char exeUtf8[128] = "?";
+                WideCharToMultiByte(CP_UTF8, 0, base ? base + 1 : fgExe, -1,
+                                    exeUtf8, sizeof(exeUtf8), nullptr, nullptr);
+
+                char buf[256];
+                sprintf_s(buf, "idx=%d valid=%d paused=%d mode=%u fg=%s pid=%lu",
                           idx, valid ? 1 : 0, servicePaused_ ? 1 : 0,
-                          valid ? settings_.shortcuts[idx].mode : 99u);
+                          valid ? settings_.shortcuts[idx].mode : 99u,
+                          exeUtf8, fgPid);
                 Telemetry::Event("HOTKEY", "wm_hotkey.recv", buf);
             }
-            if (valid && !servicePaused_ && settings_.shortcuts[idx].mode == 0)
+            if (valid && !servicePaused_ && settings_.shortcuts[idx].mode == 0) {
                 ToggleMute();
+                // Resultado REAL del toggle: si el estado cambió, el atajo
+                // funcionó aunque no se haya visto ningún indicador.
+                char buf[64];
+                sprintf_s(buf, "muted=%d", State() == MicState::Muted ? 1 : 0);
+                Telemetry::Event("HOTKEY", "toggle.result", buf);
+            }
             return 0;
         }
 
