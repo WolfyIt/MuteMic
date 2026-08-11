@@ -287,6 +287,15 @@ LRESULT MuteMicCore::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
                     Telemetry::Event("HOTKEY", "rawinput.recv", msg);
                 }
 
+                // Filtrar auto-repetición: solo interesan los FLANCOS.
+                const size_t slot = i % kMaxDedupe;
+                if (!up) {
+                    if (rawKeyDown_[slot]) break;   // repetición, ignorar
+                    rawKeyDown_[slot] = true;
+                } else {
+                    rawKeyDown_[slot] = false;
+                }
+
                 DispatchShortcut(i, !up);
                 break;
             }

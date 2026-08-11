@@ -139,6 +139,10 @@ private:
     static constexpr ULONGLONG kDedupeMs = 60;
     ULONGLONG lastDownMs_[kMaxDedupe] = {};
     ULONGLONG lastUpMs_[kMaxDedupe] = {};
+    // Raw input NO filtra la auto-repetición del teclado: mantener la tecla
+    // entrega un down cada ~30 ms. Sin esta bandera, dejarla apretada
+    // muteaba y desmuteaba varias veces por segundo.
+    bool rawKeyDown_[kMaxDedupe] = {};
 
     // Poll de gamepads (XInput) con backoff en desconectados.
     WORD padPrev_[4] = {};
