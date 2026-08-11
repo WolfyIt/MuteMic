@@ -114,6 +114,22 @@ bool MuteMicCore::Init() {
     ApplyBindings();
 
     SetTimer(hwnd_, kPadTimerId, kPadIntervalMs, nullptr);
+
+    // Raw Input del teclado en segundo plano (RIDEV_INPUTSINK). Es la
+    // tercera vía de entrada, y la única cuya cola UIPI no documenta como
+    // bloqueada sobre ventanas elevadas. RIDEV_NOLEGACY NO se usa: eso
+    // suprimiría los mensajes de teclado normales de TODO el sistema.
+    {
+        RAWINPUTDEVICE rid{};
+        rid.usUsagePage = 0x01;   // Generic Desktop
+        rid.usUsage = 0x06;       // Keyboard
+        rid.dwFlags = RIDEV_INPUTSINK;
+        rid.hwndTarget = hwnd_;
+        const bool ok = RegisterRawInputDevices(&rid, 1, sizeof(rid)) != FALSE;
+        char buf[64];
+        sprintf_s(buf, "ok=%d err=%lu", ok ? 1 : 0, ok ? 0UL : GetLastError());
+        Telemetry::Event("HOTKEY", "rawinput.register", buf);
+    }
     UpdateMeterTimer();
     return true;
 }
@@ -165,6 +181,21 @@ LRESULT CALLBACK MuteMicCore::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
 
 void MuteMicCore::DispatchShortcut(size_t idx, bool down) {
     if (servicePaused_ || idx >= settings_.shortcuts.size()) return;
+
+    // DEDUPE entre vías de entrada. Una misma tecla puede llegar por hasta
+    // tres caminos a la vez (RegisterHotKey, hook de bajo nivel, raw
+    // input); sin esto, un solo toque muteaba y desmuteaba al instante.
+    // La primera vía que llegue gana; las demás se ignoran en la ventana.
+    const ULONGLONG now = GetTickCount64();
+    const size_t slot = idx % kMaxDedupe;
+    if (down) {
+        if (now - lastDownMs_[slot] < kDedupeMs) return;
+        lastDownMs_[slot] = now;
+    } else {
+        if (now - lastUpMs_[slot] < kDedupeMs) return;
+        lastUpMs_[slot] = now;
+    }
+
     const UINT mode = settings_.shortcuts[idx].mode;
 
     if (down) {
@@ -194,6 +225,73 @@ LRESULT MuteMicCore::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
         case HotkeyHook::WM_APP_HOTKEY_UP:
             DispatchShortcut(static_cast<size_t>(wParam), false);
             return 0;
+
+        case WM_INPUT: {
+            // ── Tercera vía de entrada: Raw Input con RIDEV_INPUTSINK ──
+            // Llega por la cola de raw input, que es DISTINTA de los
+            // mensajes de ventana y de los hooks. UIPI bloquea aquellos dos
+            // sobre ventanas elevadas; sobre esta no está documentado que lo
+            // haga. Se registra el proceso en foco en cada pulsación para
+            // comprobarlo con datos y no con suposiciones.
+            UINT size = 0;
+            GetRawInputData(reinterpret_cast<HRAWINPUT>(lParam), RID_INPUT,
+                            nullptr, &size, sizeof(RAWINPUTHEADER));
+            if (size == 0 || size > 256) break;
+            BYTE buf[256];
+            if (GetRawInputData(reinterpret_cast<HRAWINPUT>(lParam), RID_INPUT,
+                                buf, &size, sizeof(RAWINPUTHEADER)) != size)
+                break;
+            auto* raw = reinterpret_cast<RAWINPUT*>(buf);
+            if (raw->header.dwType != RIM_TYPEKEYBOARD) break;
+
+            const USHORT vk = raw->data.keyboard.VKey;
+            const bool up = (raw->data.keyboard.Flags & RI_KEY_BREAK) != 0;
+            if (vk == 0 || vk == 0xFF) break;   // teclas fantasma del HID
+
+            for (size_t i = 0; i < settings_.shortcuts.size(); ++i) {
+                auto const& sc = settings_.shortcuts[i];
+                if (sc.type != 0 || !sc.Bound() || sc.vk != vk) continue;
+                // Los modificadores se comprueban con el estado actual: raw
+                // input entrega cada tecla suelta, sin combinar.
+                if (sc.mods) {
+                    const bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+                    const bool alt = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
+                    const bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+                    const bool win = ((GetAsyncKeyState(VK_LWIN) |
+                                       GetAsyncKeyState(VK_RWIN)) & 0x8000) != 0;
+                    if (((sc.mods & MOD_CONTROL) != 0) != ctrl) continue;
+                    if (((sc.mods & MOD_ALT) != 0) != alt) continue;
+                    if (((sc.mods & MOD_SHIFT) != 0) != shift) continue;
+                    if (((sc.mods & MOD_WIN) != 0) != win) continue;
+                }
+
+                if (Telemetry::Enabled()) {
+                    wchar_t fgExe[MAX_PATH] = L"?";
+                    if (HWND fg = GetForegroundWindow()) {
+                        DWORD pid = 0;
+                        GetWindowThreadProcessId(fg, &pid);
+                        if (HANDLE p = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,
+                                                   FALSE, pid)) {
+                            DWORD n = MAX_PATH;
+                            QueryFullProcessImageNameW(p, 0, fgExe, &n);
+                            CloseHandle(p);
+                        }
+                    }
+                    const wchar_t* base = wcsrchr(fgExe, L'\\');
+                    char exeUtf8[128] = "?";
+                    WideCharToMultiByte(CP_UTF8, 0, base ? base + 1 : fgExe, -1,
+                                        exeUtf8, sizeof(exeUtf8), nullptr, nullptr);
+                    char msg[192];
+                    sprintf_s(msg, "idx=%zu vk=0x%02X up=%d fg=%s", i, vk,
+                              up ? 1 : 0, exeUtf8);
+                    Telemetry::Event("HOTKEY", "rawinput.recv", msg);
+                }
+
+                DispatchShortcut(i, !up);
+                break;
+            }
+            break;   // DefWindowProc debe ver WM_INPUT para su limpieza
+        }
 
         case WM_HOTKEY: {
             // Vía RegisterHotKey (cards de teclado en modo toggle). Esta es

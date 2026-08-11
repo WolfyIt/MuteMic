@@ -133,6 +133,13 @@ private:
     // Debounce del release en modos hold (teclas macro): card pendiente.
     int pendingReleaseIdx_ = -1;
 
+    // Dedupe entre vías de entrada (RegisterHotKey / hook LL / raw input):
+    // la misma tecla puede llegar por varias a la vez.
+    static constexpr size_t kMaxDedupe = 16;
+    static constexpr ULONGLONG kDedupeMs = 60;
+    ULONGLONG lastDownMs_[kMaxDedupe] = {};
+    ULONGLONG lastUpMs_[kMaxDedupe] = {};
+
     // Poll de gamepads (XInput) con backoff en desconectados.
     WORD padPrev_[4] = {};
     bool padConnected_[4] = {};
