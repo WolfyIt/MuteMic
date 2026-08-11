@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "LiquidGlassBackdrop.h"
+#include "Telemetry.h"
 
 #include <algorithm>
 #include <cmath>
@@ -112,6 +113,9 @@ struct Shared {
     // Al calmarse, se cierra y volvemos a ser visibles en screen share.
     ULONGLONG hotUntilMs = 0;
     UINT_PTR coolTimer = 0;
+    // Momento en que se PIDIÓ el refresco, para medir la latencia real
+    // hasta que el snapshot está listo.
+    ULONGLONG requestQpc = 0;
 
     // Refresco por eventos del escritorio (en vez de recapturar al mover).
     HWINEVENTHOOK hookSystem = nullptr;      // foreground, move/size, minimize
@@ -143,27 +147,16 @@ Lens* FirstLens() {
     return nullptr;
 }
 
-// ── Log de diagnóstico: %exe%\mutemic-glass.log ──
-// El pipeline tiene varios puntos de fallo silencioso (captura, device,
-// shader, effect properties); esto los hace visibles sin debugger.
+// ── Log del pipeline del cristal ──
+// Va a la telemetría unificada (mutemic-telemetry.log): tener el contexto
+// del cristal y el del resto de la app en el MISMO archivo, con la misma
+// línea de tiempo, es lo que permite correlacionar "falló la captura" con
+// "justo antes cambió el monitor" sin cruzar dos archivos a mano.
 void Log(const char* msg, HRESULT hr = S_OK) {
-#ifndef NDEBUG
-    // Solo en Debug: en Release no se escribe nada a disco.
-    wchar_t path[MAX_PATH] = {};
-    GetModuleFileNameW(nullptr, path, MAX_PATH);
-    std::wstring file = path;
-    file = file.substr(0, file.find_last_of(L'\\')) + L"\\mutemic-glass.log";
-    std::ofstream out(file, std::ios::app);
-    out << msg;
-    if (FAILED(hr)) {
-        char buf[32];
-        sprintf_s(buf, " hr=0x%08X", static_cast<unsigned>(hr));
-        out << buf;
-    }
-    out << "\n";
-#else
-    (void)msg; (void)hr;
-#endif
+    if (FAILED(hr))
+        Telemetry::Fail("GLASS", msg, hr);
+    else
+        Telemetry::Event("GLASS", msg);
 }
 
 std::vector<uint8_t> LoadShaderBlob() {
@@ -395,6 +388,17 @@ bool StartCaptureForMonitor(HMONITOR monitor) {
                 }
 
                 if (first) Log("first frame arrived");
+                {
+                    // Latencia REAL de refresco: desde que se pidió la
+                    // recaptura hasta que el frame está listo. Es el número
+                    // que importa cuando el cristal "tarda en reaccionar".
+                    char buf[96];
+                    sprintf_s(buf, "since_request_ms=%llu share_friendly=%d",
+                              g.requestQpc ? static_cast<unsigned long long>(now - g.requestQpc) : 0ULL,
+                              g.shareFriendly ? 1 : 0);
+                    Telemetry::Event("GLASS", "snapshot.ready", buf);
+                    g.requestQpc = 0;
+                }
                 InvalidateAllLenses();
             } catch (winrt::hresult_error const& e) {
                 Log("FrameArrived wrap FAILED", e.code());
@@ -406,6 +410,15 @@ bool StartCaptureForMonitor(HMONITOR monitor) {
     g.awaitingFirstFrame = true;   // no descartar el frame que esperamos
     g.session.StartCapture();
     g.monitor = monitor;
+    {
+        // Tamaño real del item: si sale 0x0, el framepool fallará y este
+        // dato es la diferencia entre diagnosticar y adivinar.
+        char buf[96];
+        auto sz = g.item ? g.item.Size() : winrt::Windows::Graphics::SizeInt32{ 0, 0 };
+        sprintf_s(buf, "w=%d h=%d hot=%d", sz.Width, sz.Height,
+                  GetTickCount64() < g.hotUntilMs ? 1 : 0);
+        Telemetry::Event("GLASS", "capture.start", buf);
+    }
     return true;
 }
 
@@ -496,7 +509,9 @@ void ScheduleRecapture(bool discrete) {
 
     // El escritorio está cambiando: mantener viva la cámara un rato para
     // que los siguientes cambios se reflejen al instante.
-    g.hotUntilMs = GetTickCount64() + kHotWindowMs;
+    const ULONGLONG nowMs = GetTickCount64();
+    if (!g.requestQpc) g.requestQpc = nowMs;   // inicio de la medición
+    g.hotUntilMs = nowMs + kHotWindowMs;
     if (g.session) return;   // sesión viva: los frames ya están llegando
 
     if (discrete) {
@@ -537,6 +552,14 @@ void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd,
     const bool discrete = (event != EVENT_OBJECT_LOCATIONCHANGE);
     if (!discrete && !IsWindowVisible(hwnd)) return;
 
+    if (discrete) {
+        // Qué evento pidió el refresco: cuando el cristal se sienta lento,
+        // esto dice si el disparador llegó tarde o si el lento fue el
+        // pipeline. Los continuos no se registran (serían un torrente).
+        char buf[64];
+        sprintf_s(buf, "event=0x%04X", event);
+        Telemetry::Event("GLASS", "recapture.request", buf);
+    }
     ScheduleRecapture(discrete);
 }
 

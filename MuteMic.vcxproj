@@ -136,6 +136,7 @@
     <ClCompile Include="Core\LiquidGlassBackdrop.cpp" />
     <ClCompile Include="Core\MuteMicCore.cpp" />
     <ClCompile Include="Core\SettingsStore.cpp" />
+    <ClCompile Include="Core\Telemetry.cpp" />
     <ClCompile Include="Core\TrayIcon.cpp" />
     <ClCompile Include="Core\VisualCue.cpp" />
     <ClCompile Include="XamlGeneratedBodies.cpp">
@@ -161,6 +162,7 @@
     <ClInclude Include="Core\LiquidGlassBackdrop.h" />
     <ClInclude Include="Core\MuteMicCore.h" />
     <ClInclude Include="Core\SettingsStore.h" />
+    <ClInclude Include="Core\Telemetry.h" />
     <ClInclude Include="Core\TrayIcon.h" />
     <ClInclude Include="Core\VisualCue.h" />
   </ItemGroup>

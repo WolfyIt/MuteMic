@@ -20,6 +20,7 @@
 
 #include "Core/MuteMicCore.h"
 #include "Core/LiquidGlassBackdrop.h"
+#include "Core/Telemetry.h"
 
 using namespace winrt;
 using namespace winrt::Microsoft::UI::Xaml;
@@ -549,6 +550,16 @@ namespace winrt::MuteMic::implementation
 // Corre antes del diálogo "System Error" de Windows — nos dice el culpable.
 static LONG WINAPI CrashLogger(EXCEPTION_POINTERS* ep)
 {
+    // Que el crash quede también en la telemetría: así el contexto previo
+    // (qué se estaba haciendo) y el fallo viven en el MISMO archivo.
+    {
+        char buf[128];
+        sprintf_s(buf, "code=0x%08X addr=%p",
+                  ep->ExceptionRecord->ExceptionCode,
+                  ep->ExceptionRecord->ExceptionAddress);
+        mutemic::Telemetry::Event("CRASH", "unhandled", buf);
+    }
+
     wchar_t path[MAX_PATH];
     GetModuleFileNameW(nullptr, path, MAX_PATH);
     if (wchar_t* slash = wcsrchr(path, L'\\')) *(slash + 1) = 0;
@@ -608,6 +619,9 @@ int WINAPI WinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPSTR, _In_ int)
         else if (wcsstr(cmd, L"--mute")) g_startupVerb = 2;
         else if (wcsstr(cmd, L"--show")) g_startupVerb = 0;
 
+        // Telemetría: siempre en Debug, en Release solo con --diag.
+        mutemic::Telemetry::Init(wcsstr(cmd, L"--diag") != nullptr);
+
         HANDLE existing = OpenMutexW(SYNCHRONIZE, FALSE,
                                      L"Local\\MuteMic_SingleInstance");
         if (existing) {
@@ -642,6 +656,7 @@ int WINAPI WinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPSTR, _In_ int)
             winrt::make<winrt::MuteMic::implementation::App>();
         });
 
+    mutemic::Telemetry::Shutdown("normal");
     MddBootstrapShutdown();
     winrt::uninit_apartment();
     return 0;
