@@ -113,7 +113,8 @@ namespace winrt::MuteMic::implementation
                 mutemic::LiquidGlassBackdrop::OnWindowVisibility(visible);
                 // Al tray: devolver al SO lo que costó mostrar la UI. Sin
                 // esto la app se queda residente en 120-200 MB para siempre.
-                if (!visible) MuteMicCore::Get().OnWindowHidden();
+                if (visible) MuteMicCore::Get().OnWindowShown();
+                else         MuteMicCore::Get().OnWindowHidden();
             }
         });
 

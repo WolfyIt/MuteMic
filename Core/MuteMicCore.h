@@ -37,6 +37,9 @@ public:
     // app se queda con los ~200 MB que costó mostrar la UI durante días.
     // Se difiere unos cientos de ms para que XAML termine lo suyo primero.
     void OnWindowHidden();
+    // La ventana volvió: parar el recorte periódico (recortar mientras se
+    // usa la UI solo provoca fallos de página inútiles).
+    void OnWindowShown();
 
     // true durante el teardown: los handlers de UI (render por frame,
     // Closing, Changed) deben no-op para no tocar objetos muriendo.

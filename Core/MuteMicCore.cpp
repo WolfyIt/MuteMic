@@ -193,10 +193,20 @@ LRESULT MuteMicCore::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             return 0;
 
         case WM_HOTKEY: {
-            // Vía RegisterHotKey (cards de teclado en modo toggle).
+            // Vía RegisterHotKey (cards de teclado en modo toggle). Esta es
+            // la ruta que SÍ atraviesa UIPI: si el mensaje llega estando el
+            // Administrador de tareas en foco, el atajo funciona ahí.
             const int idx = static_cast<int>(wParam) - kRegisteredHotkeyBase;
-            if (idx >= 0 && static_cast<size_t>(idx) < settings_.shortcuts.size() &&
-                !servicePaused_ && settings_.shortcuts[idx].mode == 0)
+            const bool valid =
+                idx >= 0 && static_cast<size_t>(idx) < settings_.shortcuts.size();
+            {
+                char buf[128];
+                sprintf_s(buf, "idx=%d valid=%d paused=%d mode=%u",
+                          idx, valid ? 1 : 0, servicePaused_ ? 1 : 0,
+                          valid ? settings_.shortcuts[idx].mode : 99u);
+                Telemetry::Event("HOTKEY", "wm_hotkey.recv", buf);
+            }
+            if (valid && !servicePaused_ && settings_.shortcuts[idx].mode == 0)
                 ToggleMute();
             return 0;
         }
@@ -233,8 +243,12 @@ LRESULT MuteMicCore::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
 
         case WM_TIMER:
             if (wParam == kTrimTimerId) {
+                TrimWorkingSet("tray-idle");
+                // Re-armar a intervalo largo mientras siga oculta. Barato
+                // (una llamada cada 45 s) y mantiene la app en su mínimo en
+                // vez de dejarla subir sola.
                 KillTimer(hwnd, kTrimTimerId);
-                TrimWorkingSet("window-hidden");
+                SetTimer(hwnd, kTrimTimerId, 45000, nullptr);
             } else if (wParam == kMeterTimerId) {
                 lastLevel_ = audio_.GetPeak();
                 RefreshTray();
@@ -502,7 +516,18 @@ void MuteMicCore::OnWindowHidden() {
     // Diferido: al esconder, XAML todavía está liberando superficies de
     // composición. Recortar antes de que termine no sirve de nada porque
     // esas páginas vuelven a tocarse enseguida.
+    //
+    // PERIÓDICO, no una sola vez: aunque la ventana esté escondida, la app
+    // sigue trabajando (medidor del micro, icono del tray, hooks), y ese
+    // trabajo vuelve a traer páginas al working set. Un único recorte deja
+    // la memoria subiendo poco a poco hasta quedarse arriba — que es
+    // exactamente el "se va acumulando" reportado. Se re-arma solo mientras
+    // la ventana siga oculta.
     SetTimer(hwnd_, kTrimTimerId, 900, nullptr);
+}
+
+void MuteMicCore::OnWindowShown() {
+    if (hwnd_) KillTimer(hwnd_, kTrimTimerId);
 }
 
 namespace {

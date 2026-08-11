@@ -2,6 +2,7 @@
 #include "Telemetry.h"
 
 #include <cstdio>
+#include <share.h>
 #include <dwmapi.h>
 #include <dxgi.h>
 #include <psapi.h>
@@ -159,7 +160,11 @@ void Telemetry::Init(bool force) {
         }
     }
 
-    if (_wfopen_s(&g_file, path.c_str(), L"a") != 0 || !g_file) return;
+    // _SH_DENYNO: OTROS pueden LEER el archivo mientras la app lo escribe.
+    // Con fopen normal queda bloqueado en exclusiva y el log se vuelve
+    // inservible justo cuando más se necesita: durante la ejecución.
+    g_file = _wfsopen(path.c_str(), L"a", _SH_DENYNO);
+    if (!g_file) return;
     g_enabled = true;
     g_startMs = GetTickCount64();
 
