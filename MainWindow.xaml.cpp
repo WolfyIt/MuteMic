@@ -89,15 +89,14 @@ namespace winrt::MuteMic::implementation
             m_backdropConfig = nullptr;
         });
 
-        // Cerrar la ventana NO cierra la app: se esconde al tray.
-        // EXCEPTO durante el teardown o el apagado del sistema — cancelar
-        // el cierre ahí era lo que hacía que la compu tardara en apagarse.
-        AppWindow().Closing([](winrt::Microsoft::UI::Windowing::AppWindow const& sender,
-                               winrt::Microsoft::UI::Windowing::AppWindowClosingEventArgs const& args)
+        // Cerrar la ventana TERMINA este proceso. Es el punto entero del
+        // diseño de dos procesos: esconderla dejaba ~162 MB de WinUI
+        // comprometidos que no vuelven; matar el proceso sí los devuelve.
+        // El daemon sigue vivo con el tray, los atajos y el audio.
+        AppWindow().Closing([](winrt::Microsoft::UI::Windowing::AppWindow const&,
+                               winrt::Microsoft::UI::Windowing::AppWindowClosingEventArgs const&)
         {
-            if (MuteMicCore::Exiting()) return;   // dejar morir la ventana
-            args.Cancel(true);
-            sender.Hide();
+            MuteMicCore::Get().RequestExit();
         });
 
         // El backdrop de refracción muestrea lo que hay DETRÁS de la ventana.

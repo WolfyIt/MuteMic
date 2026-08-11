@@ -23,7 +23,18 @@ class MuteMicCore {
 public:
     static MuteMicCore& Get();
 
-    bool Init();
+    // ── Modos de proceso ──
+    // Daemon: proceso residente Win32 puro (tray, hooks, audio, cues, CLI).
+    //   Sin XAML: ~5 MB comprometidos, contra los ~162 MB que deja WinUI
+    //   una vez que se ha mostrado una ventana (medido en telemetría).
+    // SettingsUi: proceso EFÍMERO que solo muestra la ventana de ajustes y
+    //   muere al cerrarla, devolviendo esa memoria de verdad. No instala
+    //   tray ni bindings globales: de eso se encarga el daemon.
+    enum class Mode { Daemon, SettingsUi };
+
+    bool Init(Mode mode = Mode::Daemon);
+    Mode GetMode() const { return mode_; }
+    bool IsDaemon() const { return mode_ == Mode::Daemon; }
     void Term();
 
     // ── Acciones ──
@@ -41,6 +52,15 @@ public:
     // La ventana volvió: parar el recorte periódico (recortar mientras se
     // usa la UI solo provoca fallos de página inútiles).
     void OnWindowShown();
+
+    // Abre la ventana de ajustes en un proceso APARTE (el mismo exe con
+    // --settings). Al cerrarla, ese proceso muere y devuelve al sistema los
+    // ~160 MB de WinUI, que dentro de un solo proceso no se recuperan.
+    bool LaunchSettingsProcess();
+
+    // Abre los ajustes por la vía correcta según el modo: el daemon lanza
+    // el proceso efímero; el propio proceso de UI solo muestra su ventana.
+    void OpenSettings();
 
     // true durante el teardown: los handlers de UI (render por frame,
     // Closing, Changed) deben no-op para no tocar objetos muriendo.
@@ -113,11 +133,15 @@ private:
     void DispatchShortcut(size_t idx, bool down);
     void FinishBind();   // post-captura: aplicar, notificar, cancelar resto
 
+    Mode mode_ = Mode::Daemon;
     Settings settings_;
     AudioController audio_;
     std::unique_ptr<TrayIcon> tray_;
     HWND hwnd_ = nullptr;
     HANDLE singleInstanceMutex_ = nullptr;
+    // Proceso de ajustes en curso (solo en modo daemon).
+    HANDLE settingsProcess_ = nullptr;
+    bool settingsUiRunning_ = false;
 
     std::vector<std::function<void()>> stateListeners_;
     winrt::Windows::Media::Playback::MediaPlayer player_{ nullptr };

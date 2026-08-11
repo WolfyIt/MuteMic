@@ -25,6 +25,7 @@ constexpr UINT_PTR kMeterTimerId = 1;
 constexpr UINT_PTR kHoldReleaseTimerId = 3;
 constexpr UINT_PTR kPadTimerId = 4;
 constexpr UINT_PTR kTrimTimerId = 5;   // recorte de memoria al ir al tray
+constexpr UINT_PTR kUiWatchTimerId = 6;  // vigila el proceso de ajustes
 
 // Definida más abajo (junto al resto de helpers); se usa en HandleMessage.
 void TrimWorkingSet(const char* reason);
@@ -64,13 +65,18 @@ MuteMicCore& MuteMicCore::Get() {
     return instance;
 }
 
-bool MuteMicCore::Init() {
-    // Instancia única: si ya hay una, pedirle que abra su ventana y salir.
+bool MuteMicCore::Init(Mode mode) {
+    mode_ = mode;
     const UINT showMsg = RegisterWindowMessageW(L"MuteMic.ShowSettings");
-    singleInstanceMutex_ = CreateMutexW(nullptr, TRUE, kMutexName);
-    if (!singleInstanceMutex_ || GetLastError() == ERROR_ALREADY_EXISTS) {
-        PostMessageW(HWND_BROADCAST, showMsg, 0, 0);
-        return false;
+
+    // El MUTEX de instancia única lo posee el DAEMON. El proceso de UI es
+    // efímero y convive con él: no compite por el mutex ni se auto-cierra.
+    if (mode == Mode::Daemon) {
+        singleInstanceMutex_ = CreateMutexW(nullptr, TRUE, kMutexName);
+        if (!singleInstanceMutex_ || GetLastError() == ERROR_ALREADY_EXISTS) {
+            PostMessageW(HWND_BROADCAST, showMsg, 0, 0);
+            return false;
+        }
     }
     showSettingsMsg_ = showMsg;
     cmdMsg_ = RegisterWindowMessageW(L"MuteMic.Cmd");
@@ -94,32 +100,38 @@ bool MuteMicCore::Init() {
 
     WTSRegisterSessionNotification(hwnd_, NOTIFY_FOR_THIS_SESSION);
 
-    tray_ = std::make_unique<TrayIcon>(hwnd_);
-    tray_->Add(FaceFor(State(), 0.0f, false), 0.0f, BuildTooltip());
-
     // Scancode faltante en cards de teclado migradas.
     for (auto& sc : settings_.shortcuts)
         if (sc.type == 0 && sc.vk != 0 && sc.scan == 0)
             sc.scan = MapVirtualKeyW(sc.vk, MAPVK_VK_TO_VSC);
 
-    if (HotkeyHook::Install(hwnd_)) {
-        tray_->ShowBalloon(L"MuteMic is running",
-                           (L"Shortcut: " + HotkeyName() +
-                            L". Right-click the tray icon for the menu.").c_str());
-    } else {
-        tray_->ShowBalloon(L"MuteMic — shortcut unavailable",
-                           L"Couldn't install the keyboard hook. "
-                           L"You can still toggle from the tray.");
+    // ── Solo el DAEMON posee tray, hooks y bindings globales ──
+    // Si el proceso de UI también los instalara, cada tecla se procesaría
+    // dos veces y habría dos iconos en la bandeja.
+    if (mode == Mode::Daemon) {
+        tray_ = std::make_unique<TrayIcon>(hwnd_);
+        tray_->Add(FaceFor(State(), 0.0f, false), 0.0f, BuildTooltip());
+
+        if (HotkeyHook::Install(hwnd_)) {
+            tray_->ShowBalloon(L"MuteMic is running",
+                               (L"Shortcut: " + HotkeyName() +
+                                L". Right-click the tray icon for the menu.").c_str());
+        } else {
+            tray_->ShowBalloon(L"MuteMic — shortcut unavailable",
+                               L"Couldn't install the keyboard hook. "
+                               L"You can still toggle from the tray.");
+        }
+        ApplyBindings();
     }
-    ApplyBindings();
 
-    SetTimer(hwnd_, kPadTimerId, kPadIntervalMs, nullptr);
+    if (mode == Mode::Daemon) {
+        SetTimer(hwnd_, kPadTimerId, kPadIntervalMs, nullptr);
 
-    // Raw Input del teclado en segundo plano (RIDEV_INPUTSINK). Es la
-    // tercera vía de entrada, y la única cuya cola UIPI no documenta como
-    // bloqueada sobre ventanas elevadas. RIDEV_NOLEGACY NO se usa: eso
-    // suprimiría los mensajes de teclado normales de TODO el sistema.
-    {
+        // Raw Input del teclado en segundo plano (RIDEV_INPUTSINK). Aporta
+        // los eventos de SOLTAR tecla que RegisterHotKey no manda, útiles
+        // para push-to-talk. (Medido: no atraviesa UIPI, igual que las
+        // otras vías — ver vault/ATTEMPTS.md.) RIDEV_NOLEGACY NO se usa:
+        // suprimiría los mensajes de teclado normales de TODO el sistema.
         RAWINPUTDEVICE rid{};
         rid.usUsagePage = 0x01;   // Generic Desktop
         rid.usUsage = 0x06;       // Keyboard
@@ -130,8 +142,49 @@ bool MuteMicCore::Init() {
         sprintf_s(buf, "ok=%d err=%lu", ok ? 1 : 0, ok ? 0UL : GetLastError());
         Telemetry::Event("HOTKEY", "rawinput.register", buf);
     }
+
     UpdateMeterTimer();
+    Telemetry::Event("APP", "core.init",
+                     mode == Mode::Daemon ? "mode=daemon" : "mode=settings-ui");
     return true;
+}
+
+// Lanza el proceso EFÍMERO de ajustes. Es el mismo ejecutable con otra
+// bandera: un solo binario que distribuir, y el proceso pesado solo existe
+// mientras la ventana está abierta.
+void MuteMicCore::OpenSettings() {
+    if (mode_ == Mode::Daemon)
+        LaunchSettingsProcess();
+    else if (onOpenSettings)
+        onOpenSettings();
+}
+
+bool MuteMicCore::LaunchSettingsProcess() {
+    // Si ya hay una ventana de ajustes abierta, que se traiga al frente
+    // en vez de abrir otra.
+    PostMessageW(HWND_BROADCAST, showSettingsMsg_, 0, 0);
+    if (settingsUiRunning_) return true;
+
+    wchar_t exe[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    std::wstring cmd = std::wstring(L"\"") + exe + L"\" --settings";
+
+    STARTUPINFOW si{ sizeof(si) };
+    PROCESS_INFORMATION pi{};
+    const bool ok = CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE,
+                                   0, nullptr, nullptr, &si, &pi) != FALSE;
+    if (ok) {
+        CloseHandle(pi.hThread);
+        if (settingsProcess_) CloseHandle(settingsProcess_);
+        settingsProcess_ = pi.hProcess;
+        settingsUiRunning_ = true;
+        // Vigilar su muerte para saber cuándo vuelve a estar cerrada.
+        SetTimer(hwnd_, kUiWatchTimerId, 1000, nullptr);
+    }
+    char buf[64];
+    sprintf_s(buf, "ok=%d err=%lu", ok ? 1 : 0, ok ? 0UL : GetLastError());
+    Telemetry::Event("APP", "settings.launch", buf);
+    return ok;
 }
 
 void MuteMicCore::Term() {
@@ -378,7 +431,24 @@ LRESULT MuteMicCore::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
         }
 
         case WM_TIMER:
-            if (wParam == kTrimTimerId) {
+            if (wParam == kUiWatchTimerId) {
+                // ¿Murió el proceso de ajustes? Entonces sus ~160 MB ya
+                // volvieron al sistema, y hay que recargar los ajustes que
+                // haya guardado.
+                if (settingsProcess_ &&
+                    WaitForSingleObject(settingsProcess_, 0) == WAIT_OBJECT_0) {
+                    CloseHandle(settingsProcess_);
+                    settingsProcess_ = nullptr;
+                    settingsUiRunning_ = false;
+                    KillTimer(hwnd, kUiWatchTimerId);
+                    settings_ = SettingsStore::Load();
+                    audio_.SetDeviceId(settings_.deviceId);
+                    ApplyBindings();
+                    RefreshTray();
+                    UpdateMeterTimer();
+                    Telemetry::Event("APP", "settings.closed", "settings reloaded");
+                }
+            } else if (wParam == kTrimTimerId) {
                 TrimWorkingSet("tray-idle");
                 // Re-armar a intervalo largo mientras siga oculta. Barato
                 // (una llamada cada 45 s) y mantiene la app en su mínimo en
@@ -456,7 +526,7 @@ LRESULT MuteMicCore::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
                         UINT cmd = tray_->ShowMenu(IsAutostartEnabled(), servicePaused_);
                         switch (cmd) {
                             case IDM_OPEN:
-                                if (onOpenSettings) onOpenSettings();
+                                OpenSettings();
                                 break;
                             case IDM_TOGGLE_MUTE:
                                 ToggleMute();
@@ -508,7 +578,7 @@ LRESULT MuteMicCore::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
                 return 0;
             }
             if (showSettingsMsg_ != 0 && msg == showSettingsMsg_) {
-                if (onOpenSettings) onOpenSettings();
+                OpenSettings();
                 return 0;
             }
             // CLI: verbos desde otra invocación del exe.
@@ -605,9 +675,19 @@ void MuteMicCore::RequestExit() {
         // Orden: primero lo que dibuja/captura (glass, cues), luego hooks,
         // luego tray, y el mic restaurado dentro de Term.
         LiquidGlassBackdrop::Stop();
+        const bool daemon = self.IsDaemon();
         self.Term();
-        winrt::Microsoft::UI::Xaml::Application::Current().Exit();
+        if (daemon) {
+            // El daemon no tiene Application de XAML: su bucle es un
+            // GetMessage clásico y se sale con WM_QUIT.
+            PostQuitMessage(0);
+        } else {
+            winrt::Microsoft::UI::Xaml::Application::Current().Exit();
+        }
     };
+
+    if (IsDaemon()) { doExit(); return; }
+
     auto dq = winrt::Microsoft::UI::Dispatching::DispatcherQueue::GetForCurrentThread();
     if (dq) dq.TryEnqueue(doExit);
     else doExit();
@@ -693,7 +773,7 @@ bool MuteMicCore::ShowNativeFlyout(int x, int y) {
                 ToggleMute();
                 break;
             case NativeFlyout::Action::OpenSettings:
-                if (onOpenSettings) onOpenSettings();
+                OpenSettings();
                 break;
             case NativeFlyout::Action::Quit:
                 RequestExit();

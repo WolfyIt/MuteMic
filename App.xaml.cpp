@@ -198,26 +198,20 @@ namespace winrt::MuteMic::implementation
 
     void App::OnLaunched([[maybe_unused]] LaunchActivatedEventArgs const& args)
     {
+        // Este proceso SOLO existe para mostrar los ajustes: el daemon es
+        // quien tiene tray, hooks y bindings. Al cerrar la ventana, el
+        // proceso muere y devuelve al sistema los ~162 MB de WinUI.
         auto& core = MuteMicCore::Get();
-        if (!core.Init())
+        if (!core.Init(MuteMicCore::Mode::SettingsUi))
         {
             Exit();
             return;
         }
 
         core.onOpenSettings = [this] { ShowSettings(); };
-        core.onTrayFlyout = [this](int x, int y) { ShowTrayFlyout(x, y); };
         core.AddStateListener([this] { RefreshTrayFlyout(); });
 
-        // Start in tray: arranca silencioso (solo el ícono); la ventana se
-        // crea recién cuando el usuario la abre.
-        if (!core.GetSettings().startInTray)
-            ShowSettings();
-
-        // Verbo CLI en el primer arranque (p. ej. "MuteMic.exe --mute" sin
-        // instancia previa): aplicarlo ya inicializado el core.
-        if (g_startupVerb != 0xFFFF)
-            core.ExecuteVerb(g_startupVerb);
+        ShowSettings();
     }
 
     void App::ShowSettings()
@@ -610,10 +604,19 @@ int WINAPI WinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPSTR, _In_ int)
     // PRIMERA línea: DPI awareness antes de todo.
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
-    // CLI: si hay verbo y YA corre una instancia, mandárselo y salir al tiro
+    const wchar_t* cmd = GetCommandLineW();
+
+    // ── Dos procesos, un solo binario ──
+    // Sin bandera: DAEMON, Win32 puro, ~5 MB residentes de por vida.
+    // Con --settings: proceso EFÍMERO que levanta XAML solo para la ventana
+    // de ajustes y muere al cerrarla. Medido: WinUI deja ~162 MB
+    // comprometidos que no se recuperan dentro del mismo proceso; matarlo
+    // es la única forma real de devolverlos.
+    const bool settingsMode = wcsstr(cmd, L"--settings") != nullptr;
+
+    // CLI: si hay verbo y YA corre el daemon, mandárselo y salir al tiro
     // (sin levantar XAML — milisegundos).
     {
-        const wchar_t* cmd = GetCommandLineW();
         if (wcsstr(cmd, L"--toggle")) g_startupVerb = 1;
         else if (wcsstr(cmd, L"--unmute")) g_startupVerb = 3;
         else if (wcsstr(cmd, L"--mute")) g_startupVerb = 2;
@@ -622,15 +625,45 @@ int WINAPI WinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPSTR, _In_ int)
         // Telemetría: siempre en Debug, en Release solo con --diag.
         mutemic::Telemetry::Init(wcsstr(cmd, L"--diag") != nullptr);
 
-        HANDLE existing = OpenMutexW(SYNCHRONIZE, FALSE,
-                                     L"Local\\MuteMic_SingleInstance");
-        if (existing) {
-            CloseHandle(existing);
-            const UINT verb = (g_startupVerb == 0xFFFF) ? 0 : g_startupVerb;
-            PostMessageW(HWND_BROADCAST,
-                         RegisterWindowMessageW(L"MuteMic.Cmd"), verb, 0);
+        // El proceso de ajustes NO compite con el daemon: lo lanza él.
+        if (!settingsMode) {
+            HANDLE existing = OpenMutexW(SYNCHRONIZE, FALSE,
+                                         L"Local\\MuteMic_SingleInstance");
+            if (existing) {
+                CloseHandle(existing);
+                const UINT verb = (g_startupVerb == 0xFFFF) ? 0 : g_startupVerb;
+                PostMessageW(HWND_BROADCAST,
+                             RegisterWindowMessageW(L"MuteMic.Cmd"), verb, 0);
+                return 0;
+            }
+        }
+    }
+
+    // ── Camino del DAEMON: sin WinAppSDK, sin XAML, sin bootstrap ──
+    if (!settingsMode) {
+        winrt::init_apartment();
+        auto& core = mutemic::MuteMicCore::Get();
+        if (!core.Init(mutemic::MuteMicCore::Mode::Daemon)) {
+            mutemic::Telemetry::Shutdown("daemon-init-failed");
+            winrt::uninit_apartment();
             return 0;
         }
+        if (g_startupVerb != 0xFFFF && g_startupVerb != 0)
+            core.ExecuteVerb(g_startupVerb);
+        // Sin "start in tray", el daemon abre la ventana de ajustes en su
+        // proceso aparte nada más arrancar.
+        if (!core.GetSettings().startInTray || g_startupVerb == 0)
+            core.LaunchSettingsProcess();
+
+        MSG msg;
+        while (GetMessageW(&msg, nullptr, 0, 0)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        core.Term();
+        mutemic::Telemetry::Shutdown("daemon-exit");
+        winrt::uninit_apartment();
+        return static_cast<int>(msg.wParam);
     }
 
     winrt::init_apartment();
