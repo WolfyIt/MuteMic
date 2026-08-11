@@ -1,0 +1,75 @@
+name: Build
+
+# Existe para cerrar el bucle de verificación: cada push compila en una
+# máquina limpia de Windows, así "creo que compila" pasa a ser un hecho
+# comprobable sin depender de la máquina de nadie.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Restore NuGet
+        # MIDL falla con MIDL1003 si esto no corre antes del build: los
+        # targets que lo configuran viven en el cache de paquetes.
+        run: msbuild MuteMic.sln /t:Restore /p:Platform=x64
+
+      - name: Build (Release)
+        run: msbuild MuteMic.sln /p:Configuration=Release /p:Platform=x64 /m
+
+      - name: Verificar que el paquete está completo
+        shell: pwsh
+        run: |
+          $out = "x64\Release"
+          $required = @(
+            "MuteMic.exe",
+            "Microsoft.Graphics.Canvas.dll",
+            "Microsoft.WindowsAppRuntime.Bootstrap.dll",
+            "MuteMic.pri",
+            "App.xbf",
+            "MainWindow.xbf",
+            "LiquidGlass.cso",
+            "Themes\Colors.xbf",
+            "Themes\Styles.xbf",
+            "Sounds\mute\default.wav",
+            "Sounds\unmute\default.wav"
+          )
+          $missing = @()
+          foreach ($f in $required) {
+            if (-not (Test-Path (Join-Path $out $f))) { $missing += $f }
+          }
+          if ($missing.Count -gt 0) {
+            Write-Host "::error::Faltan archivos en la salida: $($missing -join ', ')"
+            exit 1
+          }
+          Write-Host "Paquete completo: $($required.Count) archivos verificados."
+
+      - name: Empaquetar
+        shell: pwsh
+        run: |
+          $stage = "package"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item "x64\Release\*" -Destination $stage -Recurse -Force `
+            -Exclude @("*.pdb", "*.lib", "*.exp", "*.winmd")
+          @"
+          Requires Windows App Runtime 1.6 - install once with:
+              winget install Microsoft.WindowsAppRuntime.1.6
+          Then run MuteMic.exe.
+          Windows 11 recommended (Windows 10 2004+ works with reduced visuals).
+          "@ | Out-File -FilePath "$stage\README.txt" -Encoding utf8
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MuteMic-x64
+          path: package/
+          if-no-files-found: error

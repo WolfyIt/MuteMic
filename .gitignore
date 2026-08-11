@@ -33,3 +33,6 @@ COPILOT_TASK.md
 
 # Respaldo local de archivos generados (por si el XAML compiler falla)
 _intdir-backup/
+
+WORKFLOW.md
+vault/

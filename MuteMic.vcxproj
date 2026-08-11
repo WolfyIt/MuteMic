@@ -194,12 +194,18 @@
     </FxCompile>
   </ItemGroup>
 
-  <!-- Runtime de Win2D junto al exe (unpackaged no lo copia solo). -->
+  <!-- Runtime de Win2D junto al exe (unpackaged no lo copia solo).
+       Ruta portable: $(Win2DPkg) sale de Directory.Build.props. -->
   <Target Name="CopyWin2DRuntime" AfterTargets="Build">
-    <Copy SourceFiles="C:\Users\DarkW\.nuget\packages\microsoft.graphics.win2d\1.2.0\runtimes\win-x64\native\Microsoft.Graphics.Canvas.dll"
+    <PropertyGroup>
+      <Win2DDll>$(Win2DPkg)\runtimes\win-x64\native\Microsoft.Graphics.Canvas.dll</Win2DDll>
+    </PropertyGroup>
+    <Copy SourceFiles="$(Win2DDll)"
           DestinationFolder="$(OutDir)"
           SkipUnchangedFiles="true"
-          Condition="Exists('C:\Users\DarkW\.nuget\packages\microsoft.graphics.win2d\1.2.0\runtimes\win-x64\native\Microsoft.Graphics.Canvas.dll')" />
+          Condition="Exists('$(Win2DDll)')" />
+    <Warning Text="Win2D runtime no encontrado en $(Win2DDll) — el Liquid Glass fallará al arrancar."
+             Condition="!Exists('$(Win2DDll)')" />
   </Target>
 
   <!-- NO PackageReferences here. They are ALL in Directory.Build.props. -->

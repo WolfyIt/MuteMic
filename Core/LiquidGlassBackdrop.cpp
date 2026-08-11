@@ -283,6 +283,18 @@ bool StartCaptureForMonitor(HMONITOR monitor) {
     Lens* primary = FirstLens();
     if (!primary) return false;
 
+    // El canvas puede no tener device todavía (el control aún no cargó).
+    // Crear el framepool con un device inválido devuelve E_INVALIDARG
+    // (0x80070057) — visible en mutemic-glass.log. Se difiere a
+    // CreateResources, que dispara cuando el device existe.
+    if (!primary->canvas.ReadyToDraw()) {
+        Log("canvas device not ready, deferring capture");
+        primary->canvas.CreateResources([monitor](auto&&, auto&&) {
+            if (g.active && !g.session) StartCaptureForMonitor(monitor);
+        });
+        return false;
+    }
+
     // GraphicsCaptureItem del monitor vía interop (sin picker; funciona en
     // apps desktop unpackaged).
     auto factory = winrt::get_activation_factory<WGC::GraphicsCaptureItem>();
@@ -815,17 +827,10 @@ bool LiquidGlassBackdrop::Start(HWND hwnd, MUXC::Grid const& host, bool frost,
 
     InstallEventHooks();
 
-    // La captura necesita el device del canvas; puede no existir hasta que
-    // el control cargue. CreateResources dispara cuando esté listo.
-    if (primary.canvas.ReadyToDraw()) {
-        if (!StartCaptureForMonitor(mon)) { Stop(); return false; }
-    } else {
-        Log("canvas not ready, deferring capture to CreateResources");
-        primary.canvas.CreateResources([mon](auto&&, auto&&)
-        {
-            if (g.active && !g.session) StartCaptureForMonitor(mon);
-        });
-    }
+    // StartCaptureForMonitor ya difiere solo si el device no está listo
+    // (devuelve false sin ser un fallo real), así que aquí NO se aborta:
+    // hacerlo mataba el glass en el arranque frío.
+    StartCaptureForMonitor(mon);
     return true;
 }
 

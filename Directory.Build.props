@@ -16,6 +16,24 @@
     <RootNamespace>MuteMic</RootNamespace>
   </PropertyGroup>
 
+  <!--
+    Rutas PORTABLES. Antes estaban escritas a mano apuntando al perfil de
+    una máquina concreta, lo que impedía compilar en cualquier otra (y en
+    CI). NuGetPackageRoot lo define el restore; el fallback cubre el caso
+    de evaluarse antes de que exista.
+  -->
+  <PropertyGroup>
+    <PkgRoot Condition="'$(NuGetPackageRoot)' != ''">$(NuGetPackageRoot)</PkgRoot>
+    <PkgRoot Condition="'$(PkgRoot)' == ''">$(UserProfile)\.nuget\packages\</PkgRoot>
+    <WinAppSdkVer>1.6.250108002</WinAppSdkVer>
+    <Win2DVer>1.2.0</Win2DVer>
+    <WinAppSdkPkg>$(PkgRoot)microsoft.windowsappsdk\$(WinAppSdkVer)</WinAppSdkPkg>
+    <Win2DPkg>$(PkgRoot)microsoft.graphics.win2d\$(Win2DVer)</Win2DPkg>
+    <!-- SDK de Windows: WindowsSdkDir lo aporta el toolset de VS. -->
+    <WinKitsRefs Condition="'$(WindowsSdkDir)' != ''">$(WindowsSdkDir)References\10.0.26100.0</WinKitsRefs>
+    <WinKitsRefs Condition="'$(WinKitsRefs)' == ''">$(ProgramFiles) (x86)\Windows Kits\10\References\10.0.26100.0</WinKitsRefs>
+  </PropertyGroup>
+
   <!-- ALL NuGet PackageReferences go here, NOT in the vcxproj. -->
   <ItemGroup Condition="'$(MSBuildProjectName)' == 'MuteMic'">
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.6.250108002" />
@@ -28,19 +46,19 @@
   <!-- WinMD references for MIDL/CppWinRT type resolution. -->
   <ItemGroup Condition="'$(MSBuildProjectName)' == 'MuteMic'">
     <Reference Include="Microsoft.UI.Xaml">
-      <HintPath>C:\Users\DarkW\.nuget\packages\microsoft.windowsappsdk\1.6.250108002\lib\uap10.0\Microsoft.UI.Xaml.winmd</HintPath>
+      <HintPath>$(WinAppSdkPkg)\lib\uap10.0\Microsoft.UI.Xaml.winmd</HintPath>
       <IsWinMDFile>true</IsWinMDFile>
       <Private>false</Private>
     </Reference>
     <Reference Include="Microsoft.UI">
-      <HintPath>C:\Users\DarkW\.nuget\packages\microsoft.windowsappsdk\1.6.250108002\lib\uap10.0.18362\Microsoft.UI.winmd</HintPath>
+      <HintPath>$(WinAppSdkPkg)\lib\uap10.0.18362\Microsoft.UI.winmd</HintPath>
       <IsWinMDFile>true</IsWinMDFile>
       <Private>false</Private>
     </Reference>
-    <!-- Win2D (Liquid Glass): si la versión cambia, actualizar ruta y el
-         Copy del vcxproj. -->
+    <!-- Win2D (Liquid Glass): si la versión cambia, actualizar Win2DVer
+         arriba — el Copy del vcxproj usa la misma propiedad. -->
     <Reference Include="Microsoft.Graphics.Canvas">
-      <HintPath>C:\Users\DarkW\.nuget\packages\microsoft.graphics.win2d\1.2.0\lib\uap10.0\Microsoft.Graphics.Canvas.winmd</HintPath>
+      <HintPath>$(Win2DPkg)\lib\uap10.0\Microsoft.Graphics.Canvas.winmd</HintPath>
       <IsWinMDFile>true</IsWinMDFile>
       <Private>false</Private>
     </Reference>
@@ -49,11 +67,11 @@
   <!-- Populate reference path for XAML markup compilation. -->
   <Target Name="PopulateReferencePath" BeforeTargets="MarkupCompilePass1">
     <ItemGroup>
-      <ReferencePath Include="C:\Users\DarkW\.nuget\packages\microsoft.windowsappsdk\1.6.250108002\lib\uap10.0\Microsoft.UI.Xaml.winmd" />
-      <ReferencePath Include="C:\Users\DarkW\.nuget\packages\microsoft.windowsappsdk\1.6.250108002\lib\uap10.0.18362\Microsoft.UI.winmd" />
-      <ReferencePath Include="C:\Users\DarkW\.nuget\packages\microsoft.windowsappsdk\1.6.250108002\lib\uap10.0\Microsoft.Windows.ApplicationModel.Resources.winmd" />
-      <ReferencePath Include="C:\Program Files (x86)\Windows Kits\10\References\10.0.26100.0\Windows.Foundation.FoundationContract\4.0.0.0\Windows.Foundation.FoundationContract.winmd" />
-      <ReferencePath Include="C:\Program Files (x86)\Windows Kits\10\References\10.0.26100.0\Windows.Foundation.UniversalApiContract\19.0.0.0\Windows.Foundation.UniversalApiContract.winmd" />
+      <ReferencePath Include="$(WinAppSdkPkg)\lib\uap10.0\Microsoft.UI.Xaml.winmd" />
+      <ReferencePath Include="$(WinAppSdkPkg)\lib\uap10.0.18362\Microsoft.UI.winmd" />
+      <ReferencePath Include="$(WinAppSdkPkg)\lib\uap10.0\Microsoft.Windows.ApplicationModel.Resources.winmd" />
+      <ReferencePath Include="$(WinKitsRefs)\Windows.Foundation.FoundationContract\4.0.0.0\Windows.Foundation.FoundationContract.winmd" />
+      <ReferencePath Include="$(WinKitsRefs)\Windows.Foundation.UniversalApiContract\19.0.0.0\Windows.Foundation.UniversalApiContract.winmd" />
     </ItemGroup>
   </Target>
 </Project>

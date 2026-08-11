@@ -8,6 +8,24 @@ Eres el **build debugger**. Claude (Cowork) es el **coder/arquitecto**: diseña 
 - NO rediseñes componentes, NO cambies la arquitectura, NO reescribas features. Si un fix requiere decisión de diseño, deja el error documentado con diagnóstico y no lo "arregles" a medias.
 - Cambios mínimos: prefiere el fix de 1 línea sobre la refactorización.
 
+## Protocolo de trabajo (leer PRIMERO)
+
+- **Antes de diagnosticar cualquier síntoma, leer los logs.** La app
+  escribe `mutemic-glass.log` (solo Debug, pipeline del cristal) y
+  `mutemic-crash.log` (siempre, módulo + offset + stack de un AV) junto al
+  exe. Están en la carpeta del proyecto: se LEEN, no se piden. Un `tail`
+  cuesta menos que un ciclo de compilación. Esta regla existe porque se
+  diagnosticó el glass a ciegas durante días mientras el log ya decía
+  `FramePool create FAILED hr=0x80070057`.
+- **Contexto del proyecto en `vault/`**: `INDEX.md` (mapa y responsables),
+  `STATE.md` (dónde estamos), `DECISIONS.md` (por qué es así),
+  `ATTEMPTS.md` (**lo que ya se probó y falló — consultar antes de
+  proponer**), `LESSONS.md` (errores pagados y su receta). Leer antes de
+  trabajo arquitectónico; actualizar después.
+- **Al terminar, dejar la lección escrita**: si algo costó un ciclo,
+  entra en `LESSONS.md`; si se descartó una vía, entra en `ATTEMPTS.md`.
+  Escribirla cuando se paga, no "después".
+
 ## Arquitectura del build (leer antes de tocar nada)
 
 Proyecto espejo de `NUCSoftwareStudio` (el proyecto hermano en `Desktop\NUCSoftwareStudioC++`, que compila y funciona). Ante la duda, compara con ese proyecto.
