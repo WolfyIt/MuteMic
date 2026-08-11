@@ -226,7 +226,7 @@ bool EnsureGraphics(int pxW, int pxH) {
                                DWRITE_FONT_STRETCH_NORMAL, Sc(12.0f), L"",
                                g.fmtSub.put());
     if (!g.fmtSub)
-        g.dwrite->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMIBOLD,
+        g.dwrite->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD,
                                    DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
                                    Sc(12.0f), L"", g.fmtSub.put());
     g.dwrite->CreateTextFormat(L"Segoe Fluent Icons", nullptr,

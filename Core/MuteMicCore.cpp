@@ -135,6 +135,7 @@ void MuteMicCore::Term() {
     HotkeyHook::UninstallMouse();
     HotkeyHook::Uninstall();
     tray_.reset();
+    if (cueSource_) { try { cueSource_.Close(); } catch (...) {} cueSource_ = nullptr; }
     if (player_) { player_.Close(); player_ = nullptr; }
     if (hwnd_) {
         DestroyWindow(hwnd_);
@@ -845,8 +846,23 @@ void MuteMicCore::PlayCue(bool muteCue) {
             } catch (...) {}
         }
         player_.Volume(settings_.soundVolume / 100.0);
-        player_.Source(winrt::Windows::Media::Core::MediaSource::CreateFromUri(
-            winrt::Windows::Foundation::Uri(L"file:///" + file)));
+
+        // Solo se construye un MediaSource cuando CAMBIA el archivo, y se
+        // cierra el anterior explícitamente. Reproducir el mismo sonido mil
+        // veces reusa el mismo objeto.
+        if (!cueSource_ || cueSourceFile_ != file) {
+            if (cueSource_) {
+                try { cueSource_.Close(); } catch (...) {}
+                cueSource_ = nullptr;
+            }
+            cueSource_ = winrt::Windows::Media::Core::MediaSource::CreateFromUri(
+                winrt::Windows::Foundation::Uri(L"file:///" + file));
+            cueSourceFile_ = file;
+            player_.Source(cueSource_);
+        }
+        // Rebobinar y disparar: sin re-asignar Source no hay objeto nuevo.
+        try { player_.PlaybackSession().Position(winrt::Windows::Foundation::TimeSpan{ 0 }); }
+        catch (...) {}
         player_.Play();
     } catch (...) {
         // Sin audio de salida o archivo corrupto: el cue es opcional.

@@ -1,5 +1,8 @@
 #include "pch.h"
 #include "VisualCue.h"
+#include "Telemetry.h"
+
+#include <psapi.h>
 
 #include <algorithm>
 #include <atomic>
@@ -465,6 +468,7 @@ void StopThread() {
 
 void DestroyRegions() {
     StopThread();
+    const bool had = (c.regionCount > 0);
     for (int i = 0; i < c.regionCount; ++i) {
         auto& r = c.regions[i];
         r.dcVisual = nullptr;
@@ -488,6 +492,32 @@ void DestroyRegions() {
         }
     }
     if (gfx.ok && gfx.dcomp) gfx.dcomp->Commit();
+
+    // D3D11 destruye recursos de forma DIFERIDA: soltar el puntero no
+    // libera la memoria de vídeo hasta que el contexto procesa la orden.
+    // Sin este Flush, cada cue deja su swapchain y sus buffers pendientes
+    // y el consumo crece toggle a toggle (~0.7 MB medidos por cue).
+    if (had && gfx.ok && gfx.d3d) {
+        winrt::com_ptr<ID3D11DeviceContext> ctx;
+        gfx.d3d->GetImmediateContext(ctx.put());
+        if (ctx) {
+            ctx->ClearState();
+            ctx->Flush();
+        }
+    }
+
+    if (had) {
+        PROCESS_MEMORY_COUNTERS_EX pmc{};
+        pmc.cb = sizeof(pmc);
+        GetProcessMemoryInfo(GetCurrentProcess(),
+                             reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&pmc),
+                             sizeof(pmc));
+        char buf[128];
+        sprintf_s(buf, "private_mb=%.1f working_set_mb=%.1f",
+                  pmc.PrivateUsage / 1048576.0, pmc.WorkingSetSize / 1048576.0);
+        Telemetry::Event("CUE", "teardown", buf);
+    }
+
     c.regionCount = 0;
     c.active = false;
 }

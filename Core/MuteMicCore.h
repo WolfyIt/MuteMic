@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include <winrt/Windows.Media.Core.h>
 #include <winrt/Windows.Media.Playback.h>
 
 #include "AudioController.h"
@@ -120,6 +121,11 @@ private:
 
     std::vector<std::function<void()>> stateListeners_;
     winrt::Windows::Media::Playback::MediaPlayer player_{ nullptr };
+    // MediaSource CACHEADO por archivo: crear uno nuevo en cada cue deja
+    // el anterior vivo (Source() no cierra el que reemplaza), y cada uno
+    // arrastra su decodificador. Spameando el atajo eso se acumula.
+    winrt::Windows::Media::Core::MediaSource cueSource_{ nullptr };
+    std::wstring cueSourceFile_;
     std::optional<bool> originalMute_;
 
     // Captura de binding en curso: índice de la card (-1 = ninguna).
