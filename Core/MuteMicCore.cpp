@@ -1,14 +1,18 @@
 #include "pch.h"
 #include "MuteMicCore.h"
 
+#include <psapi.h>
 #include <wtsapi32.h>
 #include <xinput.h>
+
+#pragma comment(lib, "psapi.lib")
 
 #include <winrt/Windows.Media.Core.h>
 
 #include "Autostart.h"
 #include "IconRenderer.h"
 #include "LiquidGlassBackdrop.h"
+#include "Telemetry.h"
 #include "VisualCue.h"
 
 namespace mutemic {
@@ -19,6 +23,10 @@ constexpr wchar_t kMutexName[] = L"Local\\MuteMic_SingleInstance";
 constexpr UINT_PTR kMeterTimerId = 1;
 constexpr UINT_PTR kHoldReleaseTimerId = 3;
 constexpr UINT_PTR kPadTimerId = 4;
+constexpr UINT_PTR kTrimTimerId = 5;   // recorte de memoria al ir al tray
+
+// Definida más abajo (junto al resto de helpers); se usa en HandleMessage.
+void TrimWorkingSet(const char* reason);
 constexpr UINT kMeterIntervalMs = 33;
 constexpr UINT kPadIntervalMs = 30;
 // Debounce del "soltar" en modos hold: las teclas macro (NZXT, Synapse F14)
@@ -116,6 +124,7 @@ void MuteMicCore::Term() {
         KillTimer(hwnd_, kMeterTimerId);
         KillTimer(hwnd_, kPadTimerId);
         KillTimer(hwnd_, kHoldReleaseTimerId);
+        KillTimer(hwnd_, kTrimTimerId);
         WTSUnRegisterSessionNotification(hwnd_);
         for (size_t i = 0; i < settings_.shortcuts.size(); ++i)
             UnregisterHotKey(hwnd_, kRegisteredHotkeyBase + static_cast<int>(i));
@@ -223,7 +232,10 @@ LRESULT MuteMicCore::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
         }
 
         case WM_TIMER:
-            if (wParam == kMeterTimerId) {
+            if (wParam == kTrimTimerId) {
+                KillTimer(hwnd, kTrimTimerId);
+                TrimWorkingSet("window-hidden");
+            } else if (wParam == kMeterTimerId) {
                 lastLevel_ = audio_.GetPeak();
                 RefreshTray();
             } else if (wParam == kPadTimerId) {
@@ -449,6 +461,97 @@ void MuteMicCore::RequestExit() {
 // ─────────────────────────────────────────────────────────────────────────────
 // Shortcut cards
 
+namespace {
+
+// ¿Es una tecla DEDICADA, que nadie usa para escribir ni como atajo de app?
+//
+// PORQUÉ IMPORTA: `RegisterHotKey` es la única vía que funciona cuando una
+// app ELEVADA tiene el foco (el hook de bajo nivel lo bloquea UIPI: un
+// proceso normal no puede ver el input dirigido a uno elevado, p. ej. el
+// Administrador de tareas). Pero RegisterHotKey se APROPIA de la tecla en
+// todo el sistema: registrar "M" sin modificadores haría que escribir una
+// M en cualquier parte muteara el micro.
+//
+// La línea se traza aquí: estas teclas no existen en ningún teclado normal
+// (F13-F24 solo aparecen mapeadas desde software de macros) o ya son
+// funciones globales de por sí (multimedia). Apropiárselas es exactamente
+// lo que el usuario pidió al asignarlas.
+bool IsDedicatedKey(UINT vk) {
+    if (vk >= VK_F13 && vk <= VK_F24) return true;          // macro keys
+    switch (vk) {
+        case VK_VOLUME_MUTE: case VK_VOLUME_DOWN: case VK_VOLUME_UP:
+        case VK_MEDIA_NEXT_TRACK: case VK_MEDIA_PREV_TRACK:
+        case VK_MEDIA_STOP: case VK_MEDIA_PLAY_PAUSE:
+        case VK_LAUNCH_MAIL: case VK_LAUNCH_MEDIA_SELECT:
+        case VK_LAUNCH_APP1: case VK_LAUNCH_APP2:
+        case VK_BROWSER_BACK: case VK_BROWSER_FORWARD:
+        case VK_BROWSER_REFRESH: case VK_BROWSER_STOP:
+        case VK_BROWSER_SEARCH: case VK_BROWSER_FAVORITES:
+        case VK_BROWSER_HOME:
+        case VK_PAUSE: case VK_SCROLL:
+            return true;
+        default:
+            return false;
+    }
+}
+
+}  // namespace
+
+void MuteMicCore::OnWindowHidden() {
+    if (!hwnd_) return;
+    // Diferido: al esconder, XAML todavía está liberando superficies de
+    // composición. Recortar antes de que termine no sirve de nada porque
+    // esas páginas vuelven a tocarse enseguida.
+    SetTimer(hwnd_, kTrimTimerId, 900, nullptr);
+}
+
+namespace {
+
+// Devuelve al sistema las páginas del working set que ya no se usan.
+//
+// QUÉ HACE DE VERDAD: no "libera" memoria en el sentido de free() — mueve
+// las páginas del working set a la lista de standby, donde el SO puede
+// reutilizarlas al instante si alguien las necesita. Si la app vuelve a
+// tocarlas, regresan con un fallo de página blando (barato).
+//
+// POR QUÉ HACE FALTA: mostrar la ventana de WinUI 3 construye el árbol
+// visual, las superficies de composición y las texturas del render. Al
+// esconderla, ese trabajo no se deshace: la app se queda con 120-200 MB
+// residentes durante días para algo que nadie está mirando. Para una app
+// que vive en el tray, conservar ese working set es puro egoísmo.
+//
+// LO QUE NO ES: un truco cosmético para que el Administrador de tareas
+// muestre un número bonito. Las páginas quedan REALMENTE disponibles.
+void TrimWorkingSet(const char* reason) {
+    PROCESS_MEMORY_COUNTERS_EX before{};
+    before.cb = sizeof(before);
+    GetProcessMemoryInfo(GetCurrentProcess(),
+                         reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&before),
+                         sizeof(before));
+
+    SetProcessWorkingSetSizeEx(GetCurrentProcess(),
+                               static_cast<SIZE_T>(-1),
+                               static_cast<SIZE_T>(-1),
+                               QUOTA_LIMITS_HARDWS_MIN_DISABLE |
+                               QUOTA_LIMITS_HARDWS_MAX_DISABLE);
+
+    PROCESS_MEMORY_COUNTERS_EX after{};
+    after.cb = sizeof(after);
+    GetProcessMemoryInfo(GetCurrentProcess(),
+                         reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&after),
+                         sizeof(after));
+
+    char buf[192];
+    sprintf_s(buf, "reason=%s before_mb=%.1f after_mb=%.1f private_mb=%.1f",
+              reason,
+              before.WorkingSetSize / 1048576.0,
+              after.WorkingSetSize / 1048576.0,
+              after.PrivateUsage / 1048576.0);
+    Telemetry::Event("PERF", "workingset.trim", buf);
+}
+
+}  // namespace
+
 void MuteMicCore::ApplyBindings() {
     HotkeyHook::ClearBindings();
     HotkeyHook::UninstallMouse();
@@ -462,16 +565,41 @@ void MuteMicCore::ApplyBindings() {
         const int id = static_cast<int>(i);
         switch (sc.type) {
             case 0: {  // teclado
-                // Doble vía en toggle con mods: RegisterHotKey (apps elevadas)
-                // Y hook inerte para ese combo → registrar SOLO una.
+                // RegisterHotKey es la ÚNICA vía que atraviesa UIPI (apps
+                // elevadas con el foco: Administrador de tareas, instaladores,
+                // juegos lanzados como admin). Se usa siempre que se pueda:
+                //   - modo toggle (RegisterHotKey no notifica key-up, así que
+                //     PTT/PTM no pueden usarlo), y
+                //   - con modificadores, O una tecla dedicada (F13-F24,
+                //     multimedia) que sea seguro apropiarse globalmente.
+                // Si no aplica, queda el hook — que funciona en todo salvo
+                // sobre ventanas elevadas.
                 bool registered = false;
-                if (sc.mode == 0 && sc.mods != 0) {
+                const bool canRegister =
+                    (sc.mode == 0) && (sc.mods != 0 || IsDedicatedKey(sc.vk));
+                if (canRegister) {
                     registered = RegisterHotKey(
                         hwnd_, kRegisteredHotkeyBase + id,
                         sc.mods | MOD_NOREPEAT, sc.vk) != FALSE;
+                    if (!registered) {
+                        // Otra app ya se apropió del combo. Vale la pena
+                        // saberlo: explica un atajo "que no funciona" sin
+                        // que nada esté roto en nuestro lado.
+                        char buf[96];
+                        sprintf_s(buf, "idx=%d vk=0x%02X mods=0x%02X err=%lu",
+                                  id, sc.vk, sc.mods, GetLastError());
+                        Telemetry::Event("HOTKEY", "register.failed", buf);
+                    }
                 }
                 if (!registered)
                     HotkeyHook::AddKeyBinding(id, { sc.vk, sc.scan, sc.mods });
+                {
+                    char buf[96];
+                    sprintf_s(buf, "idx=%d vk=0x%02X mods=0x%02X mode=%u path=%s",
+                              id, sc.vk, sc.mods, sc.mode,
+                              registered ? "RegisterHotKey(UIPI-proof)" : "LL-hook");
+                    Telemetry::Event("HOTKEY", "bind", buf);
+                }
                 break;
             }
             case 1:  // mouse

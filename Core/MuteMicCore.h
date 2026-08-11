@@ -32,6 +32,12 @@ public:
     void SetServicePaused(bool paused);
     void RequestExit();
 
+    // La ventana se escondió al tray: soltar lo que solo servía para verla
+    // y devolver al SO las páginas que ya no se van a tocar. Sin esto, la
+    // app se queda con los ~200 MB que costó mostrar la UI durante días.
+    // Se difiere unos cientos de ms para que XAML termine lo suyo primero.
+    void OnWindowHidden();
+
     // true durante el teardown: los handlers de UI (render por frame,
     // Closing, Changed) deben no-op para no tocar objetos muriendo.
     static bool Exiting() { return exiting_.load(std::memory_order_relaxed); }

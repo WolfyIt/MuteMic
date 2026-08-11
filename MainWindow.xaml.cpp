@@ -108,7 +108,13 @@ namespace winrt::MuteMic::implementation
             if (e.DidPositionChange() || e.DidSizeChange())
                 mutemic::LiquidGlassBackdrop::RequestRedraw();
             if (e.DidVisibilityChange())
-                mutemic::LiquidGlassBackdrop::OnWindowVisibility(sender.IsVisible());
+            {
+                const bool visible = sender.IsVisible();
+                mutemic::LiquidGlassBackdrop::OnWindowVisibility(visible);
+                // Al tray: devolver al SO lo que costó mostrar la UI. Sin
+                // esto la app se queda residente en 120-200 MB para siempre.
+                if (!visible) MuteMicCore::Get().OnWindowHidden();
+            }
         });
 
         // ── Wiring con el core ──
