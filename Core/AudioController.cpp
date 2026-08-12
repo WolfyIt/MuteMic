@@ -99,7 +99,18 @@ bool AudioController::EnsureEndpoint() {
     ReleaseEndpoint();
 
     ComPtr<IMMDevice> device;
-    if (FAILED(GetDevice(deviceId_, &device))) return false;
+    if (FAILED(GetDevice(deviceId_, &device))) {
+        // El dispositivo guardado ya no existe: pasa cuando se desconecta,
+        // se deshabilita, o tras una actualización de Windows que cambia
+        // los IDs de endpoint. Antes esto dejaba la app en "sin
+        // dispositivo" para siempre, aunque hubiera micrófonos de sobra.
+        // Ahora se cae al predeterminado del sistema y se OLVIDA el id
+        // muerto, para no reintentarlo en cada llamada.
+        if (deviceId_.empty()) return false;
+        deviceId_.clear();
+        if (FAILED(GetDevice(deviceId_, &device))) return false;
+        fellBackToDefault_ = true;
+    }
 
     if (FAILED(device->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_ALL, nullptr,
                                 reinterpret_cast<void**>(&volume_)))) {

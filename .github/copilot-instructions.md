@@ -158,7 +158,11 @@ Fallos probables y sus fixes:
 1. Los WinMD `HintPath` de `Directory.Build.props` apuntan al cache NuGet real de esta máquina. Si se actualiza WindowsAppSDK, actualizar TODAS las rutas a la vez.
 2. `pch.h` termina incluyendo `App.xaml.h` y `MainWindow.xaml.h` (lo exige `XamlTypeInfo.g.cpp` vía static_assert). No reordenar.
 3. `Core/` es Win32/COM puro (Core Audio, hook LL, GDI+, tray). No introducir dependencias WinRT ahí salvo las ya presentes en `MuteMicCore.cpp`.
-4. El hook de teclado (`HotkeyHook.cpp`) no debe hacer trabajo pesado en el callback — solo `PostMessage`. Cualquier fix debe conservar eso.
+4. **TODO hook de bajo nivel (teclado Y mouse) solo hace `PostMessage`.**
+   Corre dentro de la cola de entrada del sistema: operaciones de ventana,
+   E/S de archivo o desengancharse a sí mismo dentro del callback congelan
+   ratón y teclado de la MÁQUINA ENTERA. Ya pasó una vez (pantalla trabada
+   + apagado forzado). Aplica a `HotkeyHook.cpp` y a `NativeFlyout.cpp`.
 5. Español en strings de UI, comentarios explican el *porqué*.
 
 ## Al terminar

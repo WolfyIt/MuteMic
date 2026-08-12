@@ -457,6 +457,15 @@ LRESULT MuteMicCore::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
                 SetTimer(hwnd, kTrimTimerId, 45000, nullptr);
             } else if (wParam == kMeterTimerId) {
                 lastLevel_ = audio_.GetPeak();
+                // ¿Se cayó al predeterminado porque el dispositivo guardado
+                // desapareció? Persistirlo: si no, el id muerto se queda en
+                // el registro y la UI sigue mostrando un micro inexistente.
+                if (audio_.ConsumeFellBackToDefault()) {
+                    settings_.deviceId.clear();
+                    SaveSettings();
+                    Telemetry::Event("AUDIO", "device.fallback",
+                                     "saved device gone, using system default");
+                }
                 RefreshTray();
             } else if (wParam == kPadTimerId) {
                 const ULONGLONG now = GetTickCount64();

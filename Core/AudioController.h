@@ -54,6 +54,19 @@ private:
 
     std::wstring deviceId_;           // "" = default
     std::wstring currentName_;
+    // El id guardado no existía y se cayó al predeterminado: el core lo
+    // consulta para persistir el cambio y no arrastrar un id muerto.
+    bool fellBackToDefault_ = false;
+
+public:
+    bool ConsumeFellBackToDefault() {
+        const bool v = fellBackToDefault_;
+        fellBackToDefault_ = false;
+        return v;
+    }
+    const std::wstring& DeviceId() const { return deviceId_; }
+
+private:
     IAudioEndpointVolume* volume_ = nullptr;
     IAudioMeterInformation* meter_ = nullptr;
 };

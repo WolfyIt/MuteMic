@@ -21,7 +21,9 @@ namespace mutemic {
 namespace {
 
 constexpr wchar_t kClass[] = L"MuteMicNativeFlyout";
-constexpr UINT_PTR kFadeTimer = 1;
+// Cierre pedido desde el hook de mouse. Se procesa en el bucle de
+// mensajes, NUNCA dentro del hook (ver MouseProc).
+constexpr UINT kMsgDismiss = WM_APP + 1;
 
 // Métricas en DIP (se escalan por el DPI del monitor donde se abre).
 constexpr float kWidth = 280.0f;
@@ -399,11 +401,16 @@ int HitTest(int px, int py) {
     return -1;
 }
 
-void Dismiss() { NativeFlyout::Hide(); }
-
 // El taskbar no roba la activación al hacer click, así que WM_ACTIVATE no
 // siempre llega. El hook de mouse es la vía fiable para cerrar al pinchar
 // fuera (lección heredada del flyout anterior, ver vault/LESSONS.md).
+//
+// ⚠ REGLA CRÍTICA: un hook de bajo nivel corre DENTRO de la cola de
+// entrada del sistema. Todo lo que tarde aquí congela el ratón y el
+// teclado de TODA la máquina, no solo de esta app. Prohibido: operaciones
+// de ventana (ShowWindow), E/S de archivo (el log), y desengancharse a sí
+// mismo. Aquí SOLO se hace PostMessage; el trabajo real ocurre después,
+// en el bucle de mensajes de nuestra ventana.
 LRESULT CALLBACK MouseProc(int code, WPARAM wParam, LPARAM lParam) {
     if (code == HC_ACTION && g.open &&
         (wParam == WM_LBUTTONDOWN || wParam == WM_RBUTTONDOWN ||
@@ -411,7 +418,8 @@ LRESULT CALLBACK MouseProc(int code, WPARAM wParam, LPARAM lParam) {
         auto* mi = reinterpret_cast<MSLLHOOKSTRUCT*>(lParam);
         RECT rc{};
         GetWindowRect(g.hwnd, &rc);
-        if (!PtInRect(&rc, mi->pt)) Dismiss();
+        if (!PtInRect(&rc, mi->pt))
+            PostMessageW(g.hwnd, kMsgDismiss, 0, 0);
     }
     return CallNextHookEx(nullptr, code, wParam, lParam);
 }
@@ -443,14 +451,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
 
         case WM_KEYDOWN:
-            if (wParam == VK_ESCAPE) { Dismiss(); return 0; }
+            if (wParam == VK_ESCAPE) { NativeFlyout::Hide(); return 0; }
             break;
 
         case WM_ACTIVATE:
-            if (LOWORD(wParam) == WA_INACTIVE) Dismiss();
+            if (LOWORD(wParam) == WA_INACTIVE) NativeFlyout::Hide();
             return 0;
 
         default:
+            // Cierre diferido pedido por el hook de mouse: aquí ya estamos
+            // fuera de la cola de entrada del sistema y es seguro tocar
+            // ventanas y desenganchar el hook.
+            if (msg == kMsgDismiss) { NativeFlyout::Hide(); return 0; }
             break;
     }
     return DefWindowProcW(hwnd, msg, wParam, lParam);
