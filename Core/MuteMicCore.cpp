@@ -122,6 +122,13 @@ bool MuteMicCore::Init(Mode mode) {
                                L"You can still toggle from the tray.");
         }
         ApplyBindings();
+    } else {
+        // El proceso de ajustes NO instala hooks permanentes (eso duplicaría
+        // el procesamiento de cada atajo), pero sí tiene que poder RECIBIR
+        // WM_APP_CAPTURED cuando el usuario remapea. Sin este target el
+        // hook temporal de BeginCapture postearía a nullptr y la captura no
+        // terminaría nunca.
+        HotkeyHook::SetTarget(hwnd_);
     }
 
     if (mode == Mode::Daemon) {

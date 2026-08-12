@@ -45,6 +45,11 @@ public:
 
     // Mientras está activo, la próxima tecla no-modificadora presionada se
     // reporta vía WM_APP_CAPTURED (y se consume). Esc cancela (vk=0).
+    // Ventana que recibe los WM_APP_*. Install() ya la fija para el daemon;
+    // el proceso de ajustes debe fijarla aparte, porque no llama a Install()
+    // pero sí necesita recibir WM_APP_CAPTURED al remapear.
+    static void SetTarget(HWND targetWindow);
+
     static void BeginCapture();
     static void CancelCapture();
     static bool IsCapturing();

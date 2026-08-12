@@ -7,6 +7,9 @@ namespace {
 HHOOK g_hook = nullptr;
 HWND g_target = nullptr;
 std::atomic<bool> g_capturing{false};
+// El hook lo instaló BeginCapture (proceso de ajustes), no Install (daemon).
+// Distingue quién debe retirarlo: ver CancelCapture.
+bool g_hookOwnedByCapture = false;
 
 // Multi-binding: una entrada por card. held = anti-spam por card (una
 // acción por pulsación, se rearma al soltar).
@@ -126,12 +129,43 @@ void HotkeyHook::AddKeyBinding(int id, const KeyCombo& combo) {
         g_keyBinds.push_back({ id, combo, false });
 }
 
+// La captura tiene que poder instalar su PROPIO hook, igual que ya hace el
+// ratón con EnsureMouseHook.
+//
+// Antes del split en daemon un solo proceso lo tenía todo, así que el
+// Install() del arranque también cubría la captura. Ahora la ventana de
+// ajustes es un proceso aparte que nunca llama a Install(): BeginCapture
+// ponía g_capturing=true sin ningún hook detrás, no llegaba ni una tecla, y
+// remapear un atajo de teclado no hacía absolutamente nada — en silencio.
+// Remapear con el ratón seguía funcionando, y esa asimetría es la que
+// delató el fallo.
+//
+// El hook se instala solo mientras dura la captura y se retira al terminar:
+// un hook de bajo nivel permanente en el proceso de UI le cobraría a CADA
+// pulsación de toda la máquina, y además duplicaría el procesamiento de los
+// atajos del daemon.
 void HotkeyHook::BeginCapture() {
     g_capturing = true;
+    if (!g_hook) {
+        g_hook = SetWindowsHookExW(WH_KEYBOARD_LL, LowLevelKeyboardProc,
+                                   GetModuleHandleW(nullptr), 0);
+        g_hookOwnedByCapture = (g_hook != nullptr);
+    }
 }
 
 void HotkeyHook::CancelCapture() {
     g_capturing = false;
+    // Solo se retira el que instaló la captura: el del daemon tiene que
+    // sobrevivir, o los atajos dejarían de funcionar tras el primer remapeo.
+    if (g_hookOwnedByCapture && g_hook) {
+        UnhookWindowsHookEx(g_hook);
+        g_hook = nullptr;
+        g_hookOwnedByCapture = false;
+    }
+}
+
+void HotkeyHook::SetTarget(HWND targetWindow) {
+    g_target = targetWindow;
 }
 
 bool HotkeyHook::IsCapturing() {
