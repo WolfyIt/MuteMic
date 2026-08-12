@@ -197,8 +197,16 @@ namespace winrt::MuteMic::implementation
     // ─────────────────────────────────────────────────────────────────────
     // Chrome / backdrop
 
+    // MEDIDO, no supuesto: esta función tarda ~1 s cuando el daemon está
+    // corriendo y ~156 ms cuando no. Un segundo de ventana muerta al abrir es
+    // un bug de UX, y la marca de etapa del constructor solo dice "está aquí
+    // dentro", no cuál de las cuatro llamadas lo consume. Cada paso deja su
+    // duración para que el siguiente log lo señale en vez de razonarlo.
     void MainWindow::SetupWindowChrome()
     {
+        using mutemic::Telemetry;
+        const ULONGLONG t0 = Telemetry::Now();
+
         try
         {
             if (auto p = AppWindow().Presenter().try_as<winrt::Microsoft::UI::Windowing::OverlappedPresenter>())
@@ -209,20 +217,27 @@ namespace winrt::MuteMic::implementation
             }
         }
         catch (...) {}
+        Telemetry::Duration("UI", "chrome.presenter", t0);
 
         HWND hwnd{};
         if (auto native = this->try_as<::IWindowNative>())
             native->get_WindowHandle(&hwnd);
         if (hwnd)
         {
+            const ULONGLONG tDwm = Telemetry::Now();
             BOOL dark = TRUE;
             DwmSetWindowAttribute(hwnd, 20 /*DWMWA_USE_IMMERSIVE_DARK_MODE*/, &dark, sizeof(dark));
             COLORREF none = 0xFFFFFFFE;
             DwmSetWindowAttribute(hwnd, 34 /*DWMWA_BORDER_COLOR*/, &none, sizeof(none));
+            Telemetry::Duration("UI", "chrome.dwm", tDwm);
+
+            const ULONGLONG tResize = Telemetry::Now();
             ResizeForView(false);
+            Telemetry::Duration("UI", "chrome.resize", tResize);
         }
 
         // Ícono de ventana/taskbar (el del exe lo pone MuteMic.rc).
+        const ULONGLONG tIcon = Telemetry::Now();
         try
         {
             wchar_t path[MAX_PATH] = {};
@@ -232,6 +247,7 @@ namespace winrt::MuteMic::implementation
             AppWindow().SetIcon(ico);
         }
         catch (...) {}
+        Telemetry::Duration("UI", "chrome.seticon", tIcon);
     }
 
     void MainWindow::ResizeForView(bool settingsView)
