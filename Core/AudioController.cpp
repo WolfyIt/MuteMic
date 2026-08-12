@@ -44,6 +44,11 @@ HRESULT GetDevice(const std::wstring& id, IMMDevice** outDevice) {
     return enumerator->GetDevice(id.c_str(), outDevice);
 }
 
+// Silencio entre reintentos cuando no hay dispositivo. Suficientemente corto
+// para que enchufar un micro se note enseguida, suficientemente largo para
+// que un llamador a 165 Hz no toque el servicio de audio más de una vez.
+constexpr ULONGLONG kRetryMs = 1000;
+
 }  // namespace
 
 AudioController::~AudioController() {
@@ -85,6 +90,9 @@ std::vector<CaptureDevice> AudioController::Enumerate() {
 void AudioController::SetDeviceId(const std::wstring& id) {
     if (deviceId_ == id) return;
     deviceId_ = id;
+    // Elección explícita del usuario: cancelar el backoff para que el cambio
+    // se sienta inmediato en vez de esperar a que venza el reintento.
+    retryAfter_ = 0;
     ReleaseEndpoint();
 }
 
@@ -94,8 +102,30 @@ void AudioController::ReleaseEndpoint() {
     currentName_.clear();
 }
 
+// COSTE: esta función hace CoCreateInstance + GetDefaultAudioEndpoint + dos
+// Activate. Es una ida y vuelta RPC al servicio de audio de Windows, el mismo
+// que usa el shell. Los llamadores incluyen un hook Rendering que corre a la
+// frecuencia real del monitor (165 Hz aquí), así que cualquier ruta que no
+// haga corto se convierte en una tormenta de RPC que deja inutilizable el
+// escritorio entero: barra de tareas muerta, ventanas negras, y CERO CPU
+// visible en este proceso porque está bloqueado esperando, no calculando.
+//
+// Dos condiciones tenían que romperse para que eso pasara, y las dos están
+// arregladas aquí:
+//
+//  1. El corto exigía `volume_ && meter_`. Pero el medidor es OPCIONAL —
+//     este mismo archivo lo dice más abajo y sigue adelante sin él. Un
+//     endpoint sin medidor dejaba `meter_` en null para siempre, el corto no
+//     disparaba nunca, y se re-adquiría en CADA llamada. Ahora el corto mira
+//     solo `volume_`, que es lo que define "adquirido".
+//  2. No había backoff. Sin dispositivo real, cada fallo reintentaba de
+//     inmediato. Ahora un fallo silencia los reintentos 1 s.
 bool AudioController::EnsureEndpoint() {
-    if (volume_ && meter_) return true;
+    if (volume_) return true;
+
+    const ULONGLONG now = GetTickCount64();
+    if (now < retryAfter_) return false;
+
     ReleaseEndpoint();
 
     ComPtr<IMMDevice> device;
@@ -106,15 +136,19 @@ bool AudioController::EnsureEndpoint() {
         // dispositivo" para siempre, aunque hubiera micrófonos de sobra.
         // Ahora se cae al predeterminado del sistema y se OLVIDA el id
         // muerto, para no reintentarlo en cada llamada.
-        if (deviceId_.empty()) return false;
+        if (deviceId_.empty()) { retryAfter_ = now + kRetryMs; return false; }
         deviceId_.clear();
-        if (FAILED(GetDevice(deviceId_, &device))) return false;
+        if (FAILED(GetDevice(deviceId_, &device))) {
+            retryAfter_ = now + kRetryMs;
+            return false;
+        }
         fellBackToDefault_ = true;
     }
 
     if (FAILED(device->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_ALL, nullptr,
                                 reinterpret_cast<void**>(&volume_)))) {
         volume_ = nullptr;
+        retryAfter_ = now + kRetryMs;
         return false;
     }
     if (FAILED(device->Activate(__uuidof(IAudioMeterInformation), CLSCTX_ALL, nullptr,

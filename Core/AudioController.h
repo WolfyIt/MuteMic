@@ -68,7 +68,12 @@ public:
 
 private:
     IAudioEndpointVolume* volume_ = nullptr;
+    // OPCIONAL: hay endpoints sin medidor. Su ausencia NO es un fallo de
+    // adquisición y no debe forzar re-adquirir (ver EnsureEndpoint).
     IAudioMeterInformation* meter_ = nullptr;
+    // Backoff tras un fallo de adquisición. Sin esto, un llamador por frame
+    // reintenta la enumeración COM 165 veces por segundo.
+    ULONGLONG retryAfter_ = 0;
 };
 
 }  // namespace mutemic

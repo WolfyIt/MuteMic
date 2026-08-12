@@ -1,174 +1,265 @@
 # Copilot instructions — MuteMic (WinUI 3 C++/WinRT, unpackaged)
 
-## Tu rol
+## Your role
 
-Eres el **build debugger**. Claude (Cowork) es el **coder/arquitecto**: diseña features, escribe el código nuevo y decide la arquitectura. Tu trabajo es conseguir que `MuteMic.sln` compile y corra:
+You are the **build debugger**. Claude (Cowork) is the **coder/architect**: designs features, writes new code, and decides architecture. Your job is to get `MuteMic.sln` to compile and run:
 
-- Arregla errores de compilación/link **mecánicos**: includes faltantes, typos, firmas que no coinciden, rutas del vcxproj, archivos generados desincronizados.
-- NO rediseñes componentes, NO cambies la arquitectura, NO reescribas features. Si un fix requiere decisión de diseño, deja el error documentado con diagnóstico y no lo "arregles" a medias.
-- Cambios mínimos: prefiere el fix de 1 línea sobre la refactorización.
+- Fix **mechanical** compile/link errors: missing includes, typos, mismatched signatures, vcxproj paths, desynchronized generated files.
+- Do NOT redesign components, do NOT change architecture, do NOT rewrite features. If a fix requires a design decision, leave the error documented with a diagnosis and do not half-fix it.
+- Minimal changes: prefer the one-line fix over the refactor.
 
-## Protocolo de trabajo (leer PRIMERO)
+## Working protocol (read FIRST)
 
-- **Antes de diagnosticar cualquier síntoma, leer los logs.** La app
-  escribe `mutemic-glass.log` (solo Debug, pipeline del cristal) y
-  `mutemic-crash.log` (siempre, módulo + offset + stack de un AV) junto al
-  exe. Están en la carpeta del proyecto: se LEEN, no se piden. Un `tail`
-  cuesta menos que un ciclo de compilación. Esta regla existe porque se
-  diagnosticó el glass a ciegas durante días mientras el log ya decía
+- **Before diagnosing any symptom, read the logs.** The app writes
+  `mutemic-glass.log` (Debug only, glass pipeline) and `mutemic-crash.log`
+  (always: module + offset + stack of an AV) next to the exe. They are in the
+  project folder: they get READ, not requested. A `tail` costs less than a
+  build cycle. This rule exists because the glass pipeline was diagnosed blind
+  for days while the log already said
   `FramePool create FAILED hr=0x80070057`.
-- **Contexto del proyecto en `vault/`**: `INDEX.md` (mapa y responsables),
-  `STATE.md` (dónde estamos), `DECISIONS.md` (por qué es así),
-  `ATTEMPTS.md` (**lo que ya se probó y falló — consultar antes de
-  proponer**), `LESSONS.md` (errores pagados y su receta). Leer antes de
-  trabajo arquitectónico; actualizar después.
-- **Al terminar, dejar la lección escrita**: si algo costó un ciclo,
-  entra en `LESSONS.md`; si se descartó una vía, entra en `ATTEMPTS.md`.
-  Escribirla cuando se paga, no "después".
+- **Project context lives in `vault/`**: `INDEX.md` (map and owners),
+  `STATE.md` (where we are), `DECISIONS.md` (why it is this way),
+  `ATTEMPTS.md` (**what was already tried and failed — check before
+  proposing**), `LESSONS.md` (errors paid for and their recipe). Read before
+  architectural work; update afterwards.
+- **When you finish, write the lesson down**: if something cost a cycle, it
+  goes in `LESSONS.md`; if an approach was discarded, it goes in
+  `ATTEMPTS.md`. Write it when it is paid for, not "later".
 
-## Arquitectura del build (leer antes de tocar nada)
+## Build architecture (read before touching anything)
 
-Proyecto espejo de `NUCSoftwareStudio` (el proyecto hermano en `Desktop\NUCSoftwareStudioC++`, que compila y funciona). Ante la duda, compara con ese proyecto.
+Mirror of `NUCSoftwareStudio` (the sibling project in `Desktop\NUCSoftwareStudioC++`, which compiles and works). When in doubt, compare against that project.
 
-- **Unpackaged WinUI 3 desktop**: `WindowsPackageType=None`, sin `ApplicationType`, sin `CppWinRTEnabled` (props UWP prohibidas). NuGet solo en `Directory.Build.props`, nunca en el vcxproj.
-- **Entry point manual**: `DISABLE_XAML_GENERATED_MAIN=1`; `WinMain` está en `App.xaml.cpp` (bootstrap `MddBootstrapInitialize` + exports WinRT manuales). El `wWinMain` de `App.xaml.g.hpp` queda excluido por ese define.
-- **DPI**: `SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)` es la PRIMERA línea de WinMain + `app.manifest` PerMonitorV2. No mover ni quitar.
+- **Unpackaged WinUI 3 desktop**: `WindowsPackageType=None`, no `ApplicationType`, no `CppWinRTEnabled` (UWP props are forbidden). NuGet only in `Directory.Build.props`, never in the vcxproj.
+- **Manual entry point**: `DISABLE_XAML_GENERATED_MAIN=1`; `WinMain` lives in `App.xaml.cpp` (bootstrap `MddBootstrapInitialize` + manual WinRT exports). The `wWinMain` from `App.xaml.g.hpp` is excluded by that define.
+- **DPI**: `SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)` is the FIRST line of WinMain, plus `app.manifest` PerMonitorV2. Do not move or remove it.
 
-### El sistema de archivos generados (la parte frágil)
+### The generated-files system (the fragile part)
 
-El XAML compiler en este setup **no genera** la familia `*.xaml.g.h`. Por eso están **versionados** en `Generated Files\` (raíz del proyecto), patrón copiado de NUCS:
+In this setup the XAML compiler **does not generate** the `*.xaml.g.h` family. That is why they are **checked into source control** in `Generated Files\` (project root), a pattern copied from NUCS:
 
-| Archivo (raíz `Generated Files\`) | Qué es | Mantenimiento |
+| File (in `Generated Files\`) | What it is | Maintenance |
 |---|---|---|
-| `App.xaml.g.h` | template `AppT` (IXamlMetadataProvider) | estable, no tocar |
-| `MainWindow.xaml.g.h` | template `MainWindowT`: accessor + campo por cada `x:Name` | **actualizar a mano si cambia MainWindow.xaml** |
-| `XamlTypeInfo.xaml.g.h`, `XamlBindingInfo.xaml.g.h`, `XamlMetaDataProvider.h/.cpp`, `XamlTypeInfo.Impl.g.cpp` | infraestructura genérica del metadata provider | estable, no tocar |
+| `App.xaml.g.h` | `AppT` template (IXamlMetadataProvider) | stable, do not touch |
+| `MainWindow.xaml.g.h` | `MainWindowT` template: accessor + field per `x:Name` | **update by hand if MainWindow.xaml changes** |
+| `XamlTypeInfo.xaml.g.h`, `XamlBindingInfo.xaml.g.h`, `XamlMetaDataProvider.h/.cpp`, `XamlTypeInfo.Impl.g.cpp` | generic metadata-provider infrastructure | stable, do not touch |
 
-Lo que SÍ se genera en cada build (en `$(IntDir)` = `MuteMic\x64\<Config>\`):
+What IS generated on every build (into `$(IntDir)` = `MuteMic\x64\<Config>\`):
 
-- `App.xaml.g.hpp`, `MainWindow.xaml.g.hpp` (cuerpos Connect/InitializeComponent) — compilados vía `XamlGeneratedBodies.cpp`
-- `XamlTypeInfo.g.cpp` (tablas de tipos) — referenciado como `$(IntDir)XamlTypeInfo.g.cpp` en el vcxproj
-- `$(IntDir)Generated Files\` — salida CppWinRT (`App.g.h`, `MainWindow.g.h`, `winrt/MuteMic.h`, `XamlMetaDataProvider.g.h`)
+- `App.xaml.g.hpp`, `MainWindow.xaml.g.hpp` (Connect/InitializeComponent bodies) — compiled via `XamlGeneratedBodies.cpp`
+- `XamlTypeInfo.g.cpp` (type tables) — referenced as `$(IntDir)XamlTypeInfo.g.cpp` in the vcxproj
+- `$(IntDir)Generated Files\` — CppWinRT output (`App.g.h`, `MainWindow.g.h`, `winrt/MuteMic.h`, `XamlMetaDataProvider.g.h`)
 
-Include dirs (orden importa): `$(ProjectDir)` → `$(IntDir)` → `$(IntDir)Generated Files` → `$(ProjectDir)Generated Files`.
+Include dirs (order matters): `$(ProjectDir)` → `$(IntDir)` → `$(IntDir)Generated Files` → `$(ProjectDir)Generated Files`.
 
-### Recetas para fallos conocidos
+### Recipes for known failures
 
-- **C1083 `*.xaml.g.h` no encontrado** → falta el archivo versionado en `Generated Files\` o se rompió el include path del vcxproj. No intentes que el XAML compiler lo genere: en este setup no lo hace.
-- **LNK2001 `InitializeComponent`/`Connect`/`GetBindingConnector`** → el `.g.hpp` de `$(IntDir)` no se compiló. `XamlGeneratedBodies.cpp` debe incluirlos y el target `_XamlPass2BeforeClCompile` de `Directory.Build.targets` debe estar intacto.
-- **Se añadió/renombró un `x:Name` o handler en `MainWindow.xaml`** → sincronizar a mano `Generated Files\MainWindow.xaml.g.h`: un accessor par (get/set) + campo `_Nombre{nullptr}` del tipo correcto. Los connection IDs del `.g.hpp` se regeneran solos.
-- **Error de tipos duplicados XamlTypeInfo** → probablemente alguien añadió `$(IntDir)XamlTypeInfo.g.cpp` Y una copia en raíz. Solo debe compilarse el de `$(IntDir)`.
+- **C1083 `*.xaml.g.h` not found** → the checked-in file in `Generated Files\` is missing, or the vcxproj include path broke. Do not try to make the XAML compiler generate it: in this setup it does not.
+- **LNK2001 `InitializeComponent`/`Connect`/`GetBindingConnector`** → the `.g.hpp` in `$(IntDir)` was not compiled. `XamlGeneratedBodies.cpp` must include them, and the `_XamlPass2BeforeClCompile` target in `Directory.Build.targets` must be intact.
+- **An `x:Name` or handler was added/renamed in `MainWindow.xaml`** → hand-sync `Generated Files\MainWindow.xaml.g.h`: one accessor pair (get/set) plus a `_Name{nullptr}` field of the correct type. The connection IDs in the `.g.hpp` regenerate themselves.
+- **Duplicate-type XamlTypeInfo error** → someone probably added both `$(IntDir)XamlTypeInfo.g.cpp` AND a copy at the root. Only the `$(IntDir)` one should compile.
 - **`midl : command line error MIDL1003: error returned by the C preprocessor (2)`**
-  → NO es un error de código: falta el restore de NuGet. Pasa siempre después
-  de borrar `MuteMic\` (el `$(IntDir)`) o de un clone limpio, porque los
-  targets de CppWinRT/WindowsAppSDK que configuran MIDL viven en el cache de
-  paquetes. Fix: `msbuild MuteMic.sln /t:Restore /p:Platform=x64` y volver a
-  compilar. Regla práctica: **tras cualquier limpieza profunda, siempre
-  `/t:Restore` antes del build.**
-- **`Windows App Runtime no encontrado` al ejecutar** → `winget install Microsoft.WindowsAppRuntime.1.6` (es framework-dependent).
-- **Mojibake en strings (Ã³, â€")** → falta `/utf-8` en las opciones del compilador. Está en `AdditionalOptions`; no quitarlo.
+  → NOT a code error: the NuGet restore is missing. Happens every time after
+  deleting `MuteMic\` (the `$(IntDir)`) or on a clean clone, because the
+  CppWinRT/WindowsAppSDK targets that configure MIDL live in the package
+  cache. Fix: `msbuild MuteMic.sln /t:Restore /p:Platform=x64` and rebuild.
+  Rule of thumb: **after any deep clean, always `/t:Restore` before the
+  build.**
+- **`Windows App Runtime not found` at launch** → `winget install Microsoft.WindowsAppRuntime.1.6` (it is framework-dependent).
+- **Mojibake in strings (Ã³, â€")** → `/utf-8` is missing from the compiler options. It is in `AdditionalOptions`; do not remove it.
 
 ## Liquid Glass (Core\LiquidGlassBackdrop.* + Core\LiquidGlass.hlsl)
 
-Backdrop de refracción real: Windows.Graphics.Capture del monitor (con la
-ventana excluida vía `WDA_EXCLUDEFROMCAPTURE`) → Win2D `PixelShaderEffect`
-(shader portado del repo OverShifted/LiquidGlass) → **`CanvasControl` de
-Win2D insertado como primer hijo del RootGrid** (capa inferior). NO usar
-SystemBackdrop ni CanvasComposition: la composición de Win2D es
-Windows.UI.Composition y el backdrop de WinUI 3 es Microsoft.UI.Composition —
-árboles incompatibles (ya se intentó; C2665). El FramePool de captura debe
-crearse con `canvas.Device()` (mismo device que envuelve los frames).
-Fallos probables y sus fixes:
+Real refraction backdrop: Windows.Graphics.Capture of the monitor (with our
+window excluded via `WDA_EXCLUDEFROMCAPTURE`) → Win2D `PixelShaderEffect`
+(shader ported from the OverShifted/LiquidGlass repo) → **Win2D `CanvasControl`
+inserted as the first child of RootGrid** (bottom layer). Do NOT use
+SystemBackdrop or CanvasComposition: Win2D's composition is
+Windows.UI.Composition and the WinUI 3 backdrop is Microsoft.UI.Composition —
+incompatible trees (already tried; C2665). The capture FramePool must be
+created with `canvas.Device()` (the same device that wraps the frames).
 
-- **fxc / FxCompile falla** (no encuentra `d2d1effecthelpers.hlsli`): añadir
+Likely failures and their fixes:
+
+- **fxc / FxCompile fails** (cannot find `d2d1effecthelpers.hlsli`): add
   `<AdditionalIncludeDirectories>$(WindowsSdkDir)Include\$(WindowsTargetPlatformVersion)\um</AdditionalIncludeDirectories>`
-  al item FxCompile. Si se queja del entry point/target: el blob debe ser
-  `ps_4_0` con `/D D2D_FULL_SHADER /D D2D_ENTRY=main /E main`.
-- **PixelShaderEffect lanza al crear**: el .cso no es un custom effect D2D
-  válido (revisar defines de arriba) o falta `LiquidGlass.cso` junto al exe
-  (lo emite FxCompile a `$(OutDir)`).
-- **Falta Microsoft.Graphics.Canvas.dll en runtime**: el Target
-  `CopyWin2DRuntime` del vcxproj lo copia desde el cache NuGet; si cambia la
-  versión de Win2D, actualizar ruta ahí Y en Directory.Build.props (winmd).
-- **Las propiedades del efecto no matchean**: los nombres en
-  `props.Insert(L"...")` deben coincidir EXACTO con el cbuffer del .hlsl;
-  float2 se pasa como `PropertyValue::CreateSingleArray` de 2 floats.
-- **Arquitectura v2: UNA captura compartida + N LENTES.** `Shared` tiene el
-  snapshot, la sesión de captura y los hooks; cada `Lens` (ventana principal,
-  flyout del tray, futuros overlays) tiene su hwnd, su host, su CanvasControl
-  y su PROPIO grafo de efectos (el shader recibe el tamaño de SU ventana).
-  Añadir una ventana con cristal = `AttachLens(hwnd, grid)`, nunca copiar el
-  pipeline.
-- **NUNCA recapturar al mover una ventana.** El snapshot se toma con TODAS
-  nuestras ventanas excluidas (`WDA_EXCLUDEFROMCAPTURE`), así que sigue
-  siendo válido las muevas donde las muevas: mover solo cambia qué zona se
-  muestrea. Recapturar en cada movimiento (el ciclo de 150 ms de la v1) era
-  la causa del **jitter al arrastrar**.
-- **El snapshot se refresca por EVENTOS**: `SetWinEventHook` a
-  `EVENT_SYSTEM_FOREGROUND` y `EVENT_OBJECT_LOCATIONCHANGE`, filtrando
-  nuestro propio proceso y nuestras lentes, con debounce de 220 ms
-  (`ScheduleRecapture`). Eso arregla el "frame congelado" sin costo en reposo.
-- El host de una lente puede cambiar (el flyout se reconstruye entero al
-  cambiar de tema): `AttachLens` detecta el host nuevo y muda el canvas.
-- **Una ventana TAPADA no debe costar nada.** `WindowIsCovered()` recorre el
-  Z-order hacia arriba buscando una ventana ajena que la contenga entera
-  (saltando cloaked, `WS_EX_TRANSPARENT` y las nuestras). Con eso se corta
-  captura, shader y repintados. `IsWindowOccluded()` es la versión pública
-  con cache de 180 ms para los llamadores POR FRAME (la barra de nivel).
-  Estar "visible" (`IsWindowVisible`) NO significa que se vea.
-- La nitidez del fondo depende de tres cosas juntas, no romper ninguna:
-  offset redondeado a píxel entero, `InterpolationMode` NearestNeighbor en
-  `fxShift`, y el bitmap del snapshot creado con el DPI del canvas (con 96
-  fijo, D2D mete un `DpiCompensationEffect` que reescala todo con bilineal).
-- La lente muestrea con **predicción de movimiento** (velocidad × latencia,
-  suavizada y acotada): sin eso el cristal se arrastra en movimientos
-  rápidos, porque el marco lo mueve DWM y nuestro frame llega 1-2 después.
-- **REGLA DE ORO de compositores**: `CompositionTarget::GetCompositorForCurrentThread()`
-  devuelve un `Microsoft::UI::Composition::Compositor`. NUNCA castearlo a
-  `Windows::UI::Composition::Compositor` (QI falla y el catch degrada a
-  acrylic — el clásico "sigue con blur"), y NUNCA construir `Compositor()`
-  suelto (pertenece a otro árbol visual → negro).
-- La app queda excluida de screenshots del usuario mientras glass está activo
-  (efecto colateral de WDA_EXCLUDEFROMCAPTURE). Es by design; se restaura en
+  to the FxCompile item. If it complains about the entry point/target: the blob
+  must be `ps_4_0` with `/D D2D_FULL_SHADER /D D2D_ENTRY=main /E main`.
+- **PixelShaderEffect throws on creation**: the .cso is not a valid D2D custom
+  effect (check the defines above), or `LiquidGlass.cso` is missing next to the
+  exe (FxCompile emits it to `$(OutDir)`).
+- **Microsoft.Graphics.Canvas.dll missing at runtime**: the vcxproj
+  `CopyWin2DRuntime` target copies it from the NuGet cache; if the Win2D
+  version changes, update the path there AND in Directory.Build.props (winmd).
+- **Effect properties do not match**: the names in `props.Insert(L"...")` must
+  match the .hlsl cbuffer EXACTLY; a float2 is passed as
+  `PropertyValue::CreateSingleArray` of 2 floats.
+- **v2 architecture: ONE shared capture + N LENSES.** `Shared` holds the
+  snapshot, the capture session and the hooks; each `Lens` (main window, tray
+  flyout, future overlays) has its own hwnd, host, CanvasControl and its OWN
+  effect graph (the shader receives ITS window's size). Adding a glass window
+  = `AttachLens(hwnd, grid)`, never copy the pipeline.
+- **NEVER recapture when a window moves.** The snapshot is taken with ALL our
+  windows excluded (`WDA_EXCLUDEFROMCAPTURE`), so it stays valid wherever you
+  move them: moving only changes which region is sampled. Recapturing on every
+  move (v1's 150 ms loop) was the cause of the **drag jitter**.
+- **The snapshot refreshes on EVENTS**: `SetWinEventHook` on
+  `EVENT_SYSTEM_FOREGROUND` and `EVENT_OBJECT_LOCATIONCHANGE`, filtering out
+  our own process and our lenses, with a 220 ms debounce
+  (`ScheduleRecapture`). That fixes the "frozen frame" at zero idle cost.
+- A lens host can change (the flyout is rebuilt entirely on theme change):
+  `AttachLens` detects the new host and moves the canvas.
+- **A COVERED window must cost nothing.** `WindowIsCovered()` walks the Z-order
+  upward looking for a foreign window that fully contains it (skipping cloaked,
+  `WS_EX_TRANSPARENT` and our own). That cuts capture, shader and repaints.
+  `IsWindowOccluded()` is the public version with a 180 ms cache for PER-FRAME
+  callers (the level bar). Being "visible" (`IsWindowVisible`) does NOT mean it
+  can be seen.
+- Background sharpness depends on three things together — break none of them:
+  offset rounded to a whole pixel, `InterpolationMode` NearestNeighbor on
+  `fxShift`, and the snapshot bitmap created with the canvas DPI (with a fixed
+  96, D2D inserts a `DpiCompensationEffect` that rescales everything with
+  bilinear filtering).
+- The lens samples with **motion prediction** (velocity × latency, smoothed and
+  clamped): without it the glass lags on fast movement, because DWM moves the
+  frame and our frame arrives 1–2 behind.
+- **GOLDEN RULE for compositors**: `CompositionTarget::GetCompositorForCurrentThread()`
+  returns a `Microsoft::UI::Composition::Compositor`. NEVER cast it to
+  `Windows::UI::Composition::Compositor` (the QI fails and the catch degrades to
+  acrylic — the classic "it still has blur"), and NEVER construct a bare
+  `Compositor()` (it belongs to another visual tree → black).
+- The app is excluded from the user's screenshots while glass is active (side
+  effect of WDA_EXCLUDEFROMCAPTURE). This is by design; it is restored in
   `Stop()`.
 
-## Visual cues (Core/VisualCue.cpp) — arquitectura v2, NO regresar a v1
+## Visual cues (Core/VisualCue.cpp) — v2 architecture, do NOT go back to v1
 
-- Los cues se presentan por **DirectComposition**: ventanas
-  `WS_EX_NOREDIRECTIONBITMAP` + swapchain flip-model premultiplicado
-  (`CreateSwapChainForComposition`) por región, con un hilo de render
-  cadenciado con `DwmFlush()` (= vsync al refresh real del monitor).
-- **NUNCA volver a `UpdateLayeredWindow` como camino principal**: la
-  superficie de redirección saca al juego de independent flip (165→112 fps
-  medido). ULW existe solo como fallback si `InitGfx()` falla.
-- El artwork se dibuja con GDI+ en un DIB persistente y se sube por
-  `CopyFromMemory` a un `ID2D1Bitmap1` → backbuffer. Los bits del DIB se
-  tratan como BGRA premultiplicado (igual que exigía ULW).
-- Los "edges" son UN anillo redondeado global partido en 4 franjas sin
-  traslape (arcos en top/bottom, laterales solo la parte recta): si se tocan
-  los rects de región hay que conservar esa propiedad o salen seams.
-- Libs: `d2d1.lib` y `dcomp.lib` van por `#pragma comment(lib, ...)` en el
-  propio .cpp (no en el vcxproj).
-- El hilo se detiene SIEMPRE con `StopThread()` (flag + join) antes de tocar
-  regiones; `Term()` puede llamarse desde el propio wndproc vía
-  `kMsgAnimDone`.
+- Cues are presented via **DirectComposition**: `WS_EX_NOREDIRECTIONBITMAP`
+  windows + premultiplied flip-model swapchain
+  (`CreateSwapChainForComposition`) per region, with a render thread paced by
+  `DwmFlush()` (= vsync at the monitor's real refresh rate).
+- **NEVER go back to `UpdateLayeredWindow` as the main path**: the redirection
+  surface drops the game out of independent flip (165→112 fps, measured). ULW
+  exists only as a fallback if `InitGfx()` fails.
+- Artwork is drawn with GDI+ into a persistent DIB and uploaded via
+  `CopyFromMemory` to an `ID2D1Bitmap1` → backbuffer. The DIB bits are treated
+  as premultiplied BGRA (same as ULW required).
+- The "edges" are ONE global rounded ring split into 4 non-overlapping strips
+  (arcs on top/bottom, sides only the straight part): if the region rects are
+  touched, that property must be preserved or seams appear.
+- Libs: `d2d1.lib` and `dcomp.lib` come from `#pragma comment(lib, ...)` in the
+  .cpp itself (not in the vcxproj).
+- The thread is ALWAYS stopped with `StopThread()` (flag + join) before touching
+  regions; `Term()` may be called from the wndproc itself via `kMsgAnimDone`.
 
-## Invariantes (no cambiar sin justificación fuerte)
+## Invariants (do not change without strong justification)
 
-1. Los WinMD `HintPath` de `Directory.Build.props` apuntan al cache NuGet real de esta máquina. Si se actualiza WindowsAppSDK, actualizar TODAS las rutas a la vez.
-2. `pch.h` termina incluyendo `App.xaml.h` y `MainWindow.xaml.h` (lo exige `XamlTypeInfo.g.cpp` vía static_assert). No reordenar.
-3. `Core/` es Win32/COM puro (Core Audio, hook LL, GDI+, tray). No introducir dependencias WinRT ahí salvo las ya presentes en `MuteMicCore.cpp`.
-4. **TODO hook de bajo nivel (teclado Y mouse) solo hace `PostMessage`.**
-   Corre dentro de la cola de entrada del sistema: operaciones de ventana,
-   E/S de archivo o desengancharse a sí mismo dentro del callback congelan
-   ratón y teclado de la MÁQUINA ENTERA. Ya pasó una vez (pantalla trabada
-   + apagado forzado). Aplica a `HotkeyHook.cpp` y a `NativeFlyout.cpp`.
-5. Español en strings de UI, comentarios explican el *porqué*.
+1. The WinMD `HintPath` entries in `Directory.Build.props` point at this machine's real NuGet cache. If WindowsAppSDK is updated, update ALL the paths at once.
+2. `pch.h` ends by including `App.xaml.h` and `MainWindow.xaml.h` (required by `XamlTypeInfo.g.cpp` via static_assert). Do not reorder.
+3. `Core/` is pure Win32/COM (Core Audio, LL hook, GDI+, tray). Do not introduce WinRT dependencies there beyond the ones already present in `MuteMicCore.cpp`.
+4. **EVERY low-level hook (keyboard AND mouse) only calls `PostMessage`.**
+   It runs inside the system input queue: window operations, file I/O, or
+   unhooking itself from inside the callback freeze the mouse and keyboard of
+   the ENTIRE MACHINE. This already happened once (frozen screen + forced
+   shutdown). Applies to `HotkeyHook.cpp` and `NativeFlyout.cpp`.
+5. UI strings in English (the shipped product is English). Comments explain the
+   *why* and the cost avoided, not the what.
 
-## Al terminar
+## When you finish
 
-Reporta en un comentario/commit: qué falló, causa raíz, fix aplicado (archivo:línea) — así Claude retoma el contexto sin re-diagnosticar.
+Report in a comment/commit: what failed, root cause, fix applied (file:line) — so Claude picks the context back up without re-diagnosing.
 
-En CADA build, incluye en el resumen el TEXTO COMPLETO de todos los warnings
-(no solo el conteo): filtra la salida de msbuild con `": warning "` además de
-`": error "`. El usuario quiere verlos siempre.
+### Warning reporting — full text, always
+
+On EVERY build, include the **FULL TEXT** of every warning. A count is
+useless: `12 Warning(s)` does not say what broke.
+
+**Real failure mode (11 Aug 2026):** the output was filtered with
+`Select-String "…|Warning\(s\)|Error\(s\)"`. That pattern catches the
+*summary* line (`0 Warning(s)`) but **discards every individual warning**,
+because msbuild emits them as `path(line,col): warning C4100: …`, which does
+not contain the string `Warning(s)`. The build was reported clean without a
+single warning having been looked at — right after 481 lines were deleted,
+which is exactly when orphaned includes are most likely.
+
+**Filter on `": warning "` and `": error "`, with the colon and the spaces.**
+That is what distinguishes a diagnostic line from the summary line.
+
+Recipes that actually work:
+
+```powershell
+# Option A: save the full log and extract the diagnostics
+msbuild MuteMic.sln /p:Configuration=Debug /p:Platform=x64 /m `
+  /fl /flp:logfile=build.log`;verbosity=normal
+Select-String -Path build.log -Pattern ': (warning|error) ' |
+  ForEach-Object { $_.Line.Trim() } | Sort-Object -Unique
+```
+
+```powershell
+# Option B: inline, no intermediate file
+msbuild MuteMic.sln /p:Configuration=Debug /p:Platform=x64 /m 2>&1 |
+  Select-String -Pattern ': (warning|error) ', 'Build (succeeded|FAILED)'
+```
+
+If the result is zero `: warning ` lines, say so explicitly ("zero warnings,
+verified with the correct filter"). **Never "0 errors" on its own.**
+
+### How to test a build (this matters more than it sounds)
+
+**`MuteMic.exe` with no flag starts the daemon only.** The daemon has the
+tray, the hotkeys and the audio polling timer — but no window, no XAML, no
+render hook. Most bugs live in the settings window and a bare-exe run does not
+touch them. A 60-second daemon run proves almost nothing.
+
+To exercise the settings window: `MuteMic.exe --settings`, or launch the
+daemon and open the window from the tray flyout.
+
+Do not `Start-Process` + `Sleep 60` + `Stop-Process` and call it validated.
+That path never opens a window and never reproduces a UI bug. Run it, use it
+the way the report describes, and watch for the described symptoms.
+
+**Symptoms that will not show up in Task Manager.** If the report says the
+desktop got sluggish while MuteMic's own CPU, RAM and GPU stayed flat, that
+combination means the process is *blocked waiting* — usually a synchronous
+COM/RPC round-trip to a system service — not computing. Do not dismiss it
+because the counters look fine; flat counters are the evidence, not the
+absence of it.
+
+### Reading a crash with the .map file
+
+`GenerateMapFile` is enabled in `MuteMic.vcxproj`, so `x64\<Config>\MuteMic.map`
+can symbolize `mutemic-crash.log` without a debugger session. Two cautions:
+
+- A `.map` resolves an address to the **nearest preceding symbol**, not the
+  real function. Header-inlined WinRT projections are scattered throughout the
+  image, so a mid-image offset often lands on an unrelated neighbour.
+- Frames come from `RtlCaptureStackBackTrace` called **inside** the crash
+  handler, so the first several frames are exception-dispatch machinery
+  (`KERNELBASE!RaiseException`, ntdll unwinders), not the fault path.
+
+Trust adjacent frames that form a coherent caller/callee pair. Treat isolated
+distant frames as noise unless a debugger confirms them. Report what is
+plausible and label what is uncertain — a confident wrong stack costs more
+than an honest "frames 12-15 are unreliable".
+
+### Restore points
+
+Before a risky change lands, commit the working tree locally so there is
+something to return to. Claude cannot commit (its sandbox can create files on
+the mounted folder but not delete them, so git locking fails), so committing
+is your job. Local commits are enough; pushing is Joel's call.
+
+### Deletions
+
+Deleting files is your job, by agreement — Claude cannot delete, and routing
+deletions through you keeps them reviewable and reversible. Deletion requests
+arrive in `vault/BUILD-TASK.md` under **Pre-steps**, each with the reason it is
+safe. Review the reason before running it.
+
+### Git locks
+
+If `.git/index.lock` blocks a git operation, check whether a git process is
+actually running before removing it. Claude's sandbox can create files on the
+mounted folder but cannot delete them, so a plain `git status` from that side
+leaves a lock behind. Claude now runs git with `GIT_OPTIONAL_LOCKS=0` to avoid
+creating it at all, but pre-existing locks still need you to remove them.

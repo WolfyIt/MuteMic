@@ -12,11 +12,13 @@
 #include <microsoft.ui.xaml.window.h>   // IWindowNative
 #include <dwmapi.h>
 #include <cmath>
+#include <cstdio>   // sprintf_s en el log de decisión del backdrop
 #include <limits>
 
 #include "Core/MuteMicCore.h"
 #include "Core/Autostart.h"
 #include "Core/LiquidGlassBackdrop.h"
+#include "Core/Telemetry.h"
 
 using namespace winrt;
 using namespace winrt::Microsoft::UI::Xaml;
@@ -55,13 +57,32 @@ Media::Brush ThemeBrush(wchar_t const* key) {
 
 namespace winrt::MuteMic::implementation
 {
+    // Instrumentación de la construcción. PORQUÉ: este archivo no tenía una
+    // sola línea de telemetría, así que entre `core.init mode=settings-ui` y
+    // un crash 40 s después no había NADA — 40 segundos ciegos. Cada etapa
+    // deja marca para que el siguiente fallo diga dónde ocurrió en vez de
+    // obligar a razonar sobre el código. Coste: unos pocos fprintf por
+    // apertura de ventana, cero en reposo.
     MainWindow::MainWindow()
     {
+        using mutemic::Telemetry;
+        Telemetry::Event("UI", "mainwindow.ctor", "stage=begin");
+
         InitializeComponent();
+        Telemetry::Event("UI", "mainwindow.ctor", "stage=xaml-initialized");
+
         if (auto native = this->try_as<::IWindowNative>())
             native->get_WindowHandle(&m_hwnd);
+        Telemetry::Event("UI", "mainwindow.ctor",
+                         m_hwnd ? "stage=hwnd hwnd=ok" : "stage=hwnd hwnd=NULL");
+
         SetupWindowChrome();
+        Telemetry::Event("UI", "mainwindow.ctor", "stage=chrome");
+
         SetupBackdrop();
+        Telemetry::Event("UI", "mainwindow.ctor",
+                         m_acrylic ? "stage=backdrop acrylic=ok"
+                                   : "stage=backdrop acrylic=NULL");
 
         if (auto root = Content().try_as<FrameworkElement>())
         {
@@ -122,14 +143,37 @@ namespace winrt::MuteMic::implementation
         core.AddStateListener([this] { UpdateStateUI(); UpdateCardPresence(); });
         core.onShortcutsChanged = [this] { RebuildShortcutCards(); };
 
-        m_loading = true;
-        PopulateDevices();
-        PopulateSounds();
-        LoadFromSettings();
-        RebuildShortcutCards();
-        m_loading = false;
-        UpdateStateUI();
-        ApplyTheme();
+        // Este bloque toca settings, enumera dispositivos de audio y
+        // construye UI: es donde una hresult_error tiene más probabilidad de
+        // nacer. Se registra y se RELANZA — tragarla cambiaría el
+        // comportamiento y escondería el fallo real.
+        try
+        {
+            m_loading = true;
+            PopulateDevices();
+            Telemetry::Event("UI", "mainwindow.ctor", "stage=devices");
+            PopulateSounds();
+            LoadFromSettings();
+            Telemetry::Event("UI", "mainwindow.ctor", "stage=settings-loaded");
+            RebuildShortcutCards();
+            m_loading = false;
+            UpdateStateUI();
+            Telemetry::Event("UI", "mainwindow.ctor", "stage=ui-populated");
+            ApplyTheme();
+            Telemetry::Event("UI", "mainwindow.ctor", "stage=theme-applied");
+        }
+        catch (winrt::hresult_error const& e)
+        {
+            m_loading = false;
+            Telemetry::Fail("UI", "mainwindow.ctor.throw", e.code(), "winrt");
+            throw;
+        }
+        catch (...)
+        {
+            m_loading = false;
+            Telemetry::Event("UI", "mainwindow.ctor.throw", "kind=unknown");
+            throw;
+        }
 
         // Medidor por frame (v-sync): pico directo del endpoint.
         m_renderHook = winrt::Microsoft::UI::Xaml::Media::CompositionTarget::Rendering(
@@ -146,6 +190,8 @@ namespace winrt::MuteMic::implementation
                 return;
             UpdateLevelBar();
         });
+
+        Telemetry::Event("UI", "mainwindow.ctor", "stage=done render_hook=installed");
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -697,6 +743,22 @@ namespace winrt::MuteMic::implementation
         const bool frost = s.frost;
         auto target = this->try_as<winrt::Microsoft::UI::Composition::ICompositionSupportsSystemBackdrop>();
 
+        // AMBAS ramas de abajo exigen `target`. Si el QI falla no se aplica
+        // NI cristal NI acrylic y la ventana queda sin fondo — negra, sin
+        // rama de rescate. Registrar la decisión hace que ese caso se vea en
+        // el log en vez de inferirse desde una captura de pantalla.
+        {
+            char detail[96];
+            sprintf_s(detail, "glass=%d frost=%d target=%d acrylic=%d attached=%d",
+                      glass ? 1 : 0, frost ? 1 : 0, target ? 1 : 0,
+                      m_acrylic ? 1 : 0, m_acrylicAttached ? 1 : 0);
+            mutemic::Telemetry::Event("UI", "backdrop.decide", detail);
+            if (!target)
+                mutemic::Telemetry::Event("UI", "backdrop.none",
+                                          "QI ICompositionSupportsSystemBackdrop failed "
+                                          "-> window has no backdrop (black)");
+        }
+
         if (glass && target)
         {
             // LIQUID GLASS REAL (shader): frost = full effect; clear = solo
@@ -710,7 +772,12 @@ namespace winrt::MuteMic::implementation
             if (auto native = this->try_as<::IWindowNative>())
                 native->get_WindowHandle(&hwnd);
 
-            if (!hwnd || !mutemic::LiquidGlassBackdrop::Start(hwnd, RootGrid(), frost, true))
+            const bool started =
+                hwnd && mutemic::LiquidGlassBackdrop::Start(hwnd, RootGrid(), frost, true);
+            mutemic::Telemetry::Event("UI", "backdrop.glass",
+                                      started ? "started=1"
+                                              : "started=0 falling back to acrylic");
+            if (!started)
             {
                 if (m_acrylic && !m_acrylicAttached)
                 {
