@@ -79,6 +79,9 @@ bool MuteMicCore::Init(Mode mode) {
         }
     }
     showSettingsMsg_ = showMsg;
+    bringToFrontMsg_ = RegisterWindowMessageW(L"MuteMic.BringSettingsToFront");
+    settingsChangedMsg_ = RegisterWindowMessageW(L"MuteMic.SettingsChanged");
+    playCueMsg_ = RegisterWindowMessageW(L"MuteMic.PlayCue");
     cmdMsg_ = RegisterWindowMessageW(L"MuteMic.Cmd");
 
     IconRenderer::Startup();
@@ -166,10 +169,30 @@ void MuteMicCore::OpenSettings() {
         onOpenSettings();
 }
 
+// BUCLE DE BROADCAST — el fallo más caro de este proyecto. Qué pasaba:
+//
+//   LaunchSettingsProcess()
+//     -> PostMessage(HWND_BROADCAST, showSettingsMsg_)
+//          -> llega a la ventana oculta de ESTE MISMO daemon
+//               -> WndProc: msg == showSettingsMsg_ -> OpenSettings()
+//                    -> mode_ == Daemon -> LaunchSettingsProcess()  [bucle]
+//
+// HWND_BROADCAST alcanza TODAS las ventanas de nivel superior del escritorio,
+// incluidas las nuestras. El guard `settingsUiRunning_` protegía el
+// CreateProcess pero estaba DESPUÉS del broadcast, así que no frenaba el
+// ciclo. Cada vuelta encolaba un mensaje en cada ventana de cada aplicación
+// de la sesión: escritorio congelado, barra de tareas muerta, y cero CPU
+// visible en MuteMic porque el coste lo pagaban los DEMÁS procesos vaciando
+// sus colas.
+//
+// La causa de fondo era semántica: un mismo mensaje significaba "abre los
+// ajustes" para el daemon y "traete al frente" para la ventana. Dos
+// destinatarios, dos significados, un solo identificador. Ahora son dos
+// mensajes, y el que se emite aquí el daemon lo ignora por construcción.
 bool MuteMicCore::LaunchSettingsProcess() {
     // Si ya hay una ventana de ajustes abierta, que se traiga al frente
-    // en vez de abrir otra.
-    PostMessageW(HWND_BROADCAST, showSettingsMsg_, 0, 0);
+    // en vez de abrir otra. Este mensaje SOLO lo atiende un proceso de UI.
+    PostMessageW(HWND_BROADCAST, bringToFrontMsg_, 0, 0);
     if (settingsUiRunning_) return true;
 
     wchar_t exe[MAX_PATH] = {};
@@ -464,6 +487,23 @@ LRESULT MuteMicCore::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
                 SetTimer(hwnd, kTrimTimerId, 45000, nullptr);
             } else if (wParam == kMeterTimerId) {
                 lastLevel_ = audio_.GetPeak();
+
+                // SINCRONIZACIÓN DE ESTADO ENTRE PROCESOS.
+                //
+                // NotifyStateChanged() solo se dispara cuando ESTE proceso
+                // cambia el mute. Tras el split en daemon, quien mutea es el
+                // daemon (atajo o tray) y quien muestra el estado es el
+                // proceso de ajustes — que nunca se enteraba y se quedaba en
+                // "Mic Live" para siempre.
+                //
+                // No hace falta IPC: ambos procesos leen el MISMO endpoint de
+                // Core Audio, que es la única fuente de verdad. Basta con
+                // mirar si cambió y avisar. El timer ya existía y ya llamaba
+                // a GetPeak, así que esto no agrega ni un despertar.
+                if (const MicState now = State(); now != lastNotifiedState_) {
+                    lastNotifiedState_ = now;
+                    NotifyStateChanged();
+                }
                 // ¿Se cayó al predeterminado porque el dispositivo guardado
                 // desapareció? Persistirlo: si no, el id muerto se queda en
                 // el registro y la UI sigue mostrando un micro inexistente.
@@ -593,8 +633,36 @@ LRESULT MuteMicCore::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
                 RefreshTray();
                 return 0;
             }
+            // El proceso de ajustes pide que suene un cue. SOLO lo atiende
+            // el daemon: así la única sesión de audio del mezclador es la
+            // suya. wParam = pid del emisor, lParam = 1 si es cue de mute.
+            if (playCueMsg_ != 0 && msg == playCueMsg_) {
+                if (mode_ == Mode::Daemon &&
+                    wParam != static_cast<WPARAM>(GetCurrentProcessId()))
+                    PlayCue(lParam != 0);
+                return 0;
+            }
+            // Otro proceso guardó los ajustes: recargar. El pid del emisor
+            // viaja en wParam; ignorar el propio es lo que impide que un
+            // broadcast se realimente (ver SaveSettings).
+            if (settingsChangedMsg_ != 0 && msg == settingsChangedMsg_) {
+                if (wParam != static_cast<WPARAM>(GetCurrentProcessId()))
+                    ReloadSettings();
+                return 0;
+            }
+            // "Traete al frente": SOLO para un proceso de UI. Si el daemon
+            // lo atendiera volvería a emitirlo y se cerraría el bucle otra
+            // vez — es exactamente el fallo que este par de mensajes separa.
+            if (bringToFrontMsg_ != 0 && msg == bringToFrontMsg_) {
+                if (mode_ == Mode::SettingsUi && onOpenSettings) onOpenSettings();
+                return 0;
+            }
+            // "Abre los ajustes": lo emite una SEGUNDA invocación del exe que
+            // encuentra el mutex tomado y se muere acto seguido (ver Init).
+            // Solo el daemon lo atiende, y el emisor ya no existe para
+            // recibir la respuesta, así que no hay ciclo posible.
             if (showSettingsMsg_ != 0 && msg == showSettingsMsg_) {
-                OpenSettings();
+                if (mode_ == Mode::Daemon) OpenSettings();
                 return 0;
             }
             // CLI: verbos desde otra invocación del exe.
@@ -642,7 +710,13 @@ void MuteMicCore::SetMuteExplicit(bool muted) {
 
 void MuteMicCore::ExecuteVerb(UINT verb) {
     switch (verb) {
-        case 0: if (onOpenSettings) onOpenSettings(); break;
+        // OpenSettings() es CONSCIENTE DEL MODO: en el daemon lanza el
+        // proceso de UI, en el proceso de UI trae la ventana al frente.
+        // Antes esto llamaba directamente a `onOpenSettings`, que solo lo
+        // asigna App::OnLaunched — o sea, SOLO existe en el proceso de
+        // ajustes. En el daemon era null, así que abrir el acceso directo
+        // con la app ya corriendo no hacía absolutamente nada, en silencio.
+        case 0: OpenSettings(); break;
         case 1: if (!servicePaused_) ToggleMute(); break;
         case 2: if (!servicePaused_) SetMuteExplicit(true); break;
         case 3: if (!servicePaused_) SetMuteExplicit(false); break;
@@ -1021,7 +1095,30 @@ std::wstring MuteMicCore::PadButtonName(UINT bit) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Sonido
 
+// UNA SOLA ENTRADA EN EL MEZCLADOR DE VOLUMEN.
+//
+// Un MediaPlayer registra una sesión de audio de renderizado a nombre de su
+// proceso. Con el split en daemon, previsualizar un sonido o probar una card
+// creaba un segundo MediaPlayer en el proceso de ajustes, y Windows mostraba
+// "MuteMic" dos veces en el mezclador. Es cosmético, pero es la clase de
+// suciedad que distingue un programa cuidado de uno que solo funciona.
+//
+// El arreglo no es cerrar el player después de sonar — eso deja igual un
+// duplicado parpadeando. Es que el proceso de ajustes NO reproduzca nunca:
+// le pide al daemon, que ya tiene su sesión abierta. Si no hay daemon (se
+// lanzó --settings suelto), se reproduce local, porque entonces no hay
+// duplicado posible.
 void MuteMicCore::PlayCue(bool muteCue) {
+    if (mode_ == Mode::SettingsUi && playCueMsg_ != 0) {
+        if (HANDLE daemon = OpenMutexW(SYNCHRONIZE, FALSE, kMutexName)) {
+            CloseHandle(daemon);
+            PostMessageW(HWND_BROADCAST, playCueMsg_,
+                         static_cast<WPARAM>(GetCurrentProcessId()),
+                         muteCue ? 1 : 0);
+            return;
+        }
+    }
+
     std::wstring file =
         SoundDir(muteCue) + L"\\" +
         (muteCue ? settings_.soundMuteFile : settings_.soundUnmuteFile);
@@ -1125,11 +1222,61 @@ void MuteMicCore::RestoreOriginalState() {
 // ─────────────────────────────────────────────────────────────────────────────
 // Estado / tray
 
-void MuteMicCore::SaveSettings() { SettingsStore::Save(settings_); }
+// PROPAGACIÓN DE AJUSTES ENTRE PROCESOS.
+//
+// Tras el split en daemon hay DOS copias en memoria de la configuración. La
+// ventana guardaba a disco y el daemon nunca recargaba, así que cambiar el
+// cue, el sonido, el tema o el dispositivo no llegaba nunca a quien de hecho
+// reacciona al atajo. El síntoma que lo destapó: cambiar el estilo de cue y
+// ver el nuevo al pulsar el botón de test de la card (corre en la ventana)
+// pero el viejo al pulsar F14 (lo atiende el daemon).
+//
+// Se arregla en general, no cue por cue: quien guarda avisa, y el otro
+// recarga. El pid va en wParam porque HWND_BROADCAST también nos alcanza a
+// nosotros — ignorar el propio mensaje es lo que evita repetir el bucle de
+// broadcast que costó la sesión anterior.
+void MuteMicCore::SaveSettings() {
+    SettingsStore::Save(settings_);
+    if (settingsChangedMsg_ != 0)
+        PostMessageW(HWND_BROADCAST, settingsChangedMsg_,
+                     static_cast<WPARAM>(GetCurrentProcessId()), 0);
+}
+
+// Relee del disco y re-aplica todo lo que depende de la configuración.
+// Barato: solo corre cuando el OTRO proceso guardó de verdad.
+void MuteMicCore::ReloadSettings() {
+    settings_ = SettingsStore::Load();
+    audio_.SetDeviceId(settings_.deviceId);
+    ApplyBindings();
+    UpdateMeterTimer();
+    RefreshTray();
+    NotifyStateChanged();
+    if (onShortcutsChanged) onShortcutsChanged();
+    Telemetry::Event("APP", "settings.reload", "another process saved");
+}
 
 MicState MuteMicCore::State() { return audio_.GetState(); }
 
+// El llamador es un hook CompositionTarget::Rendering: corre a la frecuencia
+// REAL del monitor — 165 Hz en la máquina de desarrollo, y más en otras. Cada
+// llamada cruza a Core Audio.
+//
+// Un medidor de nivel no necesita 165 Hz: el ojo no distingue por encima de
+// ~60, y la barra ya suaviza por interpolación. Limitarlo aquí, y no en el
+// llamador, mantiene la garantía en un solo sitio para TODOS los llamadores
+// presentes y futuros.
+//
+// Esto no es una optimización cosmética. Cuando algo va mal aguas abajo —un
+// endpoint que se cae, dos procesos peleándose el mismo dispositivo— la
+// frecuencia es lo que convierte un error recuperable en una tormenta de RPC
+// que deja inutilizable el escritorio entero. Ya pasó dos veces. Bajar el
+// ritmo elimina el amplificador aunque el fallo de fondo reaparezca.
 float MuteMicCore::PollPeak() {
+    constexpr ULONGLONG kMinIntervalMs = 16;   // ~60 Hz techo
+    const ULONGLONG now = GetTickCount64();
+    if (now - lastPeakPoll_ < kMinIntervalMs)
+        return lastLevel_;                     // valor cacheado, cero coste
+    lastPeakPoll_ = now;
     lastLevel_ = audio_.GetPeak();
     return lastLevel_;
 }

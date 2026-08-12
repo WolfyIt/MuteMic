@@ -50,6 +50,12 @@ public:
     static ULONGLONG Now();
     static void Duration(const char* category, const char* event,
                          ULONGLONG since, const char* detail = nullptr);
+
+    // Mide sin escribir. Necesario para los llamadores POR FRAME: registrar
+    // incondicionalmente a 165 Hz con fflush por línea sería una tormenta de
+    // E/S en el hilo de UI — el mismo patrón que ya nos costó el escritorio.
+    // El llamador decide el umbral y solo entonces llama a Event/Duration.
+    static double ElapsedMsSince(ULONGLONG since);
 };
 
 // RAII para medir un bloque:  { TelemetryScope s("GLASS","recapture"); ... }

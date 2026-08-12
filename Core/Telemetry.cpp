@@ -17,6 +17,19 @@ namespace {
 FILE* g_file = nullptr;
 bool g_enabled = false;
 ULONGLONG g_startMs = 0;
+// Reloj de alta resolución. GetTickCount64 tiene ~15,6 ms de granularidad —
+// MÁS que un frame entero a 165 Hz (6 ms). Con él, todo lo que este proyecto
+// presupuesta mide "0" o salta de 0 a 16. QPC da microsegundos.
+LARGE_INTEGER g_qpcFreq{};
+LONGLONG g_startTicks = 0;
+
+double ElapsedMs() {
+    if (!g_qpcFreq.QuadPart) return 0.0;
+    LARGE_INTEGER c{};
+    QueryPerformanceCounter(&c);
+    return static_cast<double>(c.QuadPart - g_startTicks) * 1000.0 /
+           static_cast<double>(g_qpcFreq.QuadPart);
+}
 CRITICAL_SECTION g_lock;
 bool g_lockInit = false;
 ULONGLONG g_lastSampleMs = 0;
@@ -35,10 +48,8 @@ std::wstring PathNextToExe(const wchar_t* name) {
 void WriteLine(const char* category, const char* event, const char* detail) {
     if (!g_enabled || !g_file) return;
     EnterCriticalSection(&g_lock);
-    const ULONGLONG t = GetTickCount64() - g_startMs;
-    fprintf(g_file, "[%7llu ms] %-6s %-22s %s\n",
-            static_cast<unsigned long long>(t), category, event,
-            detail ? detail : "");
+    fprintf(g_file, "[%10.1f ms] %-6s %-22s %s\n",
+            ElapsedMs(), category, event, detail ? detail : "");
     fflush(g_file);   // que sobreviva a un crash: es cuando más importa
     LeaveCriticalSection(&g_lock);
 }
@@ -125,7 +136,16 @@ void DumpEnvironment() {
     WriteLine("ENV", "compositor", buf);
 
     EnumDisplayMonitors(nullptr, nullptr, MonitorEnumProc, 0);
-    DumpAdapter();
+
+    // SOSPECHOSO DE ARRANQUE LENTO. Enumerar adaptadores DXGI en un portátil
+    // híbrido puede despertar la GPU dedicada, y esto corre ANTES de que la
+    // app bombee mensajes — o sea, con el cursor de espera en pantalla. Es
+    // dato de diagnóstico, no funcionalidad: si cuesta, se difiere.
+    {
+        const ULONGLONG t = Telemetry::Now();
+        DumpAdapter();
+        Telemetry::Duration("ENV", "dxgi.enumerate", t);
+    }
 
     // SELLO DE BUILD. Sin esto es imposible saber si un log salió del
     // binario que se acaba de compilar o de uno viejo que seguía corriendo
@@ -197,6 +217,10 @@ void Telemetry::Init(bool force) {
     if (!g_file) return;
     g_enabled = true;
     g_startMs = GetTickCount64();
+    QueryPerformanceFrequency(&g_qpcFreq);
+    LARGE_INTEGER start{};
+    QueryPerformanceCounter(&start);
+    g_startTicks = start.QuadPart;
 
     SYSTEMTIME st;
     GetLocalTime(&st);
@@ -209,7 +233,28 @@ void Telemetry::Init(bool force) {
     fflush(g_file);
     LeaveCriticalSection(&g_lock);
 
+    // Cuánto tardó el proceso desde que Windows lo creó hasta aquí. Es el
+    // número que el usuario percibe como "tarda en abrir": mientras tanto el
+    // shell muestra el cursor de espera porque todavía no bombeamos mensajes.
+    {
+        FILETIME c{}, e{}, k{}, u{};
+        if (GetProcessTimes(GetCurrentProcess(), &c, &e, &k, &u)) {
+            FILETIME nowFt{};
+            GetSystemTimeAsFileTime(&nowFt);
+            const ULONGLONG created =
+                (static_cast<ULONGLONG>(c.dwHighDateTime) << 32) | c.dwLowDateTime;
+            const ULONGLONG now =
+                (static_cast<ULONGLONG>(nowFt.dwHighDateTime) << 32) | nowFt.dwLowDateTime;
+            char buf[96];
+            sprintf_s(buf, "since_process_start_ms=%.1f",
+                      static_cast<double>(now - created) / 10000.0);
+            WriteLine("ENV", "startup", buf);
+        }
+    }
+
+    const ULONGLONG tEnv = Telemetry::Now();
     DumpEnvironment();
+    Telemetry::Duration("ENV", "dump.total", tEnv);
     SampleResources();
 }
 
@@ -275,21 +320,41 @@ void Telemetry::SampleResources() {
     WriteLine("PERF", "resources", buf);
 }
 
-ULONGLONG Telemetry::Now() { return GetTickCount64(); }
+// Ticks de QPC, no milisegundos: la conversión la hace Duration, que es
+// quien conoce la frecuencia. Devolver ms aquí perdería la precisión que
+// justamente venimos a ganar.
+ULONGLONG Telemetry::Now() {
+    LARGE_INTEGER c{};
+    QueryPerformanceCounter(&c);
+    return static_cast<ULONGLONG>(c.QuadPart);
+}
+
+double Telemetry::ElapsedMsSince(ULONGLONG since) {
+    if (!g_qpcFreq.QuadPart) return 0.0;
+    LARGE_INTEGER c{};
+    QueryPerformanceCounter(&c);
+    return static_cast<double>(c.QuadPart - static_cast<LONGLONG>(since)) *
+           1000.0 / static_cast<double>(g_qpcFreq.QuadPart);
+}
 
 void Telemetry::Duration(const char* category, const char* event,
                          ULONGLONG since, const char* detail) {
+    double ms = 0.0;
+    if (g_qpcFreq.QuadPart) {
+        LARGE_INTEGER c{};
+        QueryPerformanceCounter(&c);
+        ms = static_cast<double>(c.QuadPart - static_cast<LONGLONG>(since)) *
+             1000.0 / static_cast<double>(g_qpcFreq.QuadPart);
+    }
     char buf[320];
-    sprintf_s(buf, "ms=%llu %s",
-              static_cast<unsigned long long>(GetTickCount64() - since),
-              detail ? detail : "");
+    sprintf_s(buf, "ms=%.3f %s", ms, detail ? detail : "");
     WriteLine(category, event, buf);
 }
 
 TelemetryScope::TelemetryScope(const char* category, const char* event,
                                const char* detail)
     : cat_(category), ev_(event), detail_(detail ? detail : ""),
-      start_(GetTickCount64()) {}
+      start_(Telemetry::Now()) {}
 
 TelemetryScope::~TelemetryScope() {
     Telemetry::Duration(cat_, ev_, start_, detail_.empty() ? nullptr : detail_.c_str());

@@ -51,6 +51,10 @@ public:
 private:
     bool EnsureEndpoint();
     void ReleaseEndpoint();
+    // Fallo de una operación sobre un endpoint ya adquirido: suelta las
+    // interfaces Y arma el backoff, para que un llamador por frame no
+    // reintente la adquisición COM a la frecuencia del monitor.
+    void FailEndpoint();
 
     std::wstring deviceId_;           // "" = default
     std::wstring currentName_;

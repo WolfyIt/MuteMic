@@ -179,6 +179,49 @@ namespace winrt::MuteMic::implementation
         m_renderHook = winrt::Microsoft::UI::Xaml::Media::CompositionTarget::Rendering(
             winrt::auto_revoke, [this](auto&&, auto&&)
         {
+            // LATIDO DEL RÉGIMEN ESTABLE.
+            //
+            // PORQUÉ EXISTE: toda la telemetría anterior cubría el ARRANQUE.
+            // Después de `stage=done` no se registraba absolutamente nada, así
+            // que una ventana colgada y una ventana sana producían el MISMO
+            // log — silencio — y ese silencio se leyó como "aquí murió"
+            // cuando solo decía "aquí dejamos de mirar". Eso costó tres
+            // diagnósticos equivocados.
+            //
+            // Va ANTES de los guards de salida a propósito: si el latido
+            // sigue pero el trabajo se salta, es un problema de visibilidad
+            // u oclusión; si el latido se espacia o se detiene, el hilo de UI
+            // está atascado y el hueco dice exactamente cuándo.
+            {
+                using mutemic::Telemetry;
+                static ULONGLONG s_prev = 0;
+                static ULONGLONG s_windowStart = 0;
+                static uint32_t s_frames = 0;
+                const ULONGLONG nowTicks = Telemetry::Now();
+
+                if (s_prev) {
+                    // Un frame a 165 Hz dura 6 ms. Se MIDE siempre pero se
+                    // ESCRIBE solo ante un hueco de 100 ms: eso es un atasco,
+                    // no jitter. Escribir cada frame sería el mismo error que
+                    // estamos cazando, con fflush incluido.
+                    const double gap = Telemetry::ElapsedMsSince(s_prev);
+                    if (gap > 100.0) {
+                        char d[96];
+                        sprintf_s(d, "gap_ms=%.1f", gap);
+                        Telemetry::Event("UI", "render.stall", d);
+                    }
+                }
+                s_prev = nowTicks;
+                if (!s_windowStart) s_windowStart = nowTicks;
+                if (++s_frames >= 240) {           // ~4 s a 60 Hz
+                    char d[96];
+                    sprintf_s(d, "frames=%u", s_frames);
+                    Telemetry::Duration("UI", "render.beat", s_windowStart, d);
+                    s_frames = 0;
+                    s_windowStart = nowTicks;
+                }
+            }
+
             // Guard de teardown: este evento es estático y puede disparar
             // mientras la ventana muere (era una fuente del 0xC0000005).
             if (MuteMicCore::Exiting()) return;

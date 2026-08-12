@@ -130,6 +130,9 @@ private:
     // RegisterHotKey (solo cards de teclado en modo toggle con mods —
     // la vía que funciona sobre apps elevadas).
     void ApplyBindings();
+    // Relee la configuración del disco y re-aplica todo lo que depende de
+    // ella. Lo dispara el aviso del otro proceso, nunca un sondeo.
+    void ReloadSettings();
     void DispatchShortcut(size_t idx, bool down);
     void FinishBind();   // post-captura: aplicar, notificar, cancelar resto
 
@@ -177,8 +180,24 @@ private:
     bool sessionLocked_ = false;
     bool timerRunning_ = false;
     float lastLevel_ = 0.0f;
+    // Techo de frecuencia del medidor: ver PollPeak.
+    ULONGLONG lastPeakPoll_ = 0;
+    // Último estado notificado. Detecta cambios hechos por el OTRO proceso
+    // (o por cualquier app del sistema) leyendo el endpoint compartido.
+    MicState lastNotifiedState_ = MicState::NoDevice;
     UINT taskbarCreatedMsg_ = 0;
     UINT showSettingsMsg_ = 0;
+    // "Ventana de ajustes: traete al frente." SOLO lo atiende un proceso en
+    // modo SettingsUi. Existe separado de showSettingsMsg_ porque aquel
+    // significaba dos cosas distintas para dos receptores distintos, y esa
+    // ambigüedad cerraba un bucle de broadcast. Ver LaunchSettingsProcess.
+    UINT bringToFrontMsg_ = 0;
+    // "Los ajustes cambiaron en disco": lo emite quien guarda, lo atiende el
+    // otro proceso. wParam lleva el pid del emisor para ignorar el propio.
+    UINT settingsChangedMsg_ = 0;
+    // "Suena este cue": lo emite el proceso de ajustes, lo atiende el daemon.
+    // Mantiene UNA sola sesión de audio en el mezclador. Ver PlayCue.
+    UINT playCueMsg_ = 0;
     UINT cmdMsg_ = 0;            // CLI: MuteMic.Cmd
     static inline std::atomic<bool> exiting_{ false };
 };

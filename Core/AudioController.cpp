@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "AudioController.h"
+#include "Telemetry.h"
 
 #include <initguid.h>  // define PKEY_Device_FriendlyName en este TU
 #include <mmdeviceapi.h>
@@ -96,6 +97,24 @@ void AudioController::SetDeviceId(const std::wstring& id) {
     ReleaseEndpoint();
 }
 
+// Una operación sobre un endpoint ya adquirido falló (dispositivo removido,
+// otro proceso peleándose el mismo endpoint, servicio de audio saturado).
+//
+// PORQUÉ EXISTE, en vez de llamar a ReleaseEndpoint directamente: soltar las
+// interfaces deja volume_ en null, y la SIGUIENTE llamada vuelve a hacer la
+// enumeración COM completa. Con un llamador por frame eso es una tormenta de
+// RPC contra el servicio de audio — el mismo que usa el shell — y el
+// escritorio entero se vuelve inusable. El backoff de EnsureEndpoint solo
+// cubría los fallos AL ADQUIRIR; este es el fallo AL USAR, que entraba por la
+// misma puerta sin pagar peaje.
+void AudioController::FailEndpoint() {
+    ReleaseEndpoint();
+    retryAfter_ = GetTickCount64() + kRetryMs;
+    // El backoff hace de limitador: como mucho una línea por segundo.
+    Telemetry::Event("AUDIO", "endpoint.fail",
+                     "operation failed on an acquired endpoint; backing off");
+}
+
 void AudioController::ReleaseEndpoint() {
     if (volume_) { volume_->Release(); volume_ = nullptr; }
     if (meter_) { meter_->Release(); meter_ = nullptr; }
@@ -136,7 +155,11 @@ bool AudioController::EnsureEndpoint() {
         // dispositivo" para siempre, aunque hubiera micrófonos de sobra.
         // Ahora se cae al predeterminado del sistema y se OLVIDA el id
         // muerto, para no reintentarlo en cada llamada.
-        if (deviceId_.empty()) { retryAfter_ = now + kRetryMs; return false; }
+        if (deviceId_.empty()) {
+            retryAfter_ = now + kRetryMs;
+            Telemetry::Event("AUDIO", "acquire.fail", "no default capture device");
+            return false;
+        }
         deviceId_.clear();
         if (FAILED(GetDevice(deviceId_, &device))) {
             retryAfter_ = now + kRetryMs;
@@ -149,6 +172,7 @@ bool AudioController::EnsureEndpoint() {
                                 reinterpret_cast<void**>(&volume_)))) {
         volume_ = nullptr;
         retryAfter_ = now + kRetryMs;
+        Telemetry::Event("AUDIO", "acquire.fail", "Activate(IAudioEndpointVolume) failed");
         return false;
     }
     if (FAILED(device->Activate(__uuidof(IAudioMeterInformation), CLSCTX_ALL, nullptr,
@@ -164,7 +188,7 @@ MicState AudioController::GetState() {
     if (!EnsureEndpoint()) return MicState::NoDevice;
     BOOL muted = FALSE;
     if (FAILED(volume_->GetMute(&muted))) {
-        ReleaseEndpoint();  // dispositivo removido: re-adquirir la próxima
+        FailEndpoint();  // dispositivo removido: re-adquirir tras el backoff
         return MicState::NoDevice;
     }
     return muted ? MicState::Muted : MicState::Unmuted;
@@ -174,12 +198,12 @@ MicState AudioController::Toggle() {
     if (!EnsureEndpoint()) return MicState::NoDevice;
     BOOL muted = FALSE;
     if (FAILED(volume_->GetMute(&muted))) {
-        ReleaseEndpoint();
+        FailEndpoint();
         return MicState::NoDevice;
     }
     BOOL newMuted = !muted;
     if (FAILED(volume_->SetMute(newMuted, nullptr))) {
-        ReleaseEndpoint();
+        FailEndpoint();
         return MicState::NoDevice;
     }
     return newMuted ? MicState::Muted : MicState::Unmuted;
@@ -188,7 +212,7 @@ MicState AudioController::Toggle() {
 bool AudioController::SetMuted(bool muted) {
     if (!EnsureEndpoint()) return false;
     if (FAILED(volume_->SetMute(muted ? TRUE : FALSE, nullptr))) {
-        ReleaseEndpoint();
+        FailEndpoint();
         return false;
     }
     return true;
@@ -198,7 +222,7 @@ float AudioController::GetPeak() {
     if (!EnsureEndpoint() || !meter_) return 0.0f;
     float peak = 0.0f;
     if (FAILED(meter_->GetPeakValue(&peak))) {
-        ReleaseEndpoint();
+        FailEndpoint();
         return 0.0f;
     }
     return peak;
