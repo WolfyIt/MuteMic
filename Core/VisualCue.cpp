@@ -97,6 +97,13 @@ struct CueState {
 CueState c;
 
 // Dispositivos compartidos (se crean una vez, viven todo el proceso).
+// Enfriamiento antes de soltar los gráficos de los cues. Más largo que el
+// del flyout: encadenar mute/unmute es normal y reconstruir en medio se
+// vería como un parpadeo.
+constexpr UINT kGfxCooldownMs = 5000;
+UINT_PTR g_gfxCoolTimer = 0;
+void ScheduleGfxRelease();
+
 struct Gfx {
     bool tried = false;
     bool ok = false;
@@ -123,12 +130,14 @@ double ElapsedMs() {
 bool InitGfx() {
     if (gfx.tried) return gfx.ok;
     gfx.tried = true;
+    mutemic::Telemetry::Memory("PERF", "subsystem", "cue.gfx.before");
 
     HRESULT hr = D3D11CreateDevice(
         nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
         D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0, D3D11_SDK_VERSION,
         gfx.d3d.put(), nullptr, nullptr);
     if (FAILED(hr)) return false;
+    mutemic::Telemetry::Memory("PERF", "subsystem", "cue.d3d11");
 
     gfx.dxgi = gfx.d3d.try_as<IDXGIDevice>();
     if (!gfx.dxgi) return false;
@@ -141,6 +150,7 @@ bool InitGfx() {
     if (FAILED(DCompositionCreateDevice(gfx.dxgi.get(),
                                         __uuidof(IDCompositionDevice),
                                         gfx.dcomp.put_void()))) return false;
+    mutemic::Telemetry::Memory("PERF", "subsystem", "cue.dcomp");
 
     D2D1_FACTORY_OPTIONS fo{};
     if (FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_MULTI_THREADED,
@@ -152,6 +162,11 @@ bool InitGfx() {
             D2D1_DEVICE_CONTEXT_OPTIONS_NONE, gfx.d2dCtx.put()))) return false;
 
     gfx.ok = true;
+    // Desglose: d3d11 - before = coste del DISPOSITIVO y sus asignaciones de
+    // driver (no se puede componer en GPU sin uno). after - dcomp = coste de
+    // D2D. Lo que falte hasta el total del cue son las swapchains por región,
+    // que sí dependen del tamaño y del número de regiones.
+    mutemic::Telemetry::Memory("PERF", "subsystem", "cue.gfx.after");
     return true;
 }
 
@@ -504,6 +519,15 @@ void DestroyRegions() {
             ctx->ClearState();
             ctx->Flush();
         }
+        // TERCER paso, el que faltaba. La doc de IDXGIDevice3::Trim dice que
+        // los drivers gráficos asignan buffers internos que cuentan como
+        // memoria de LA APP; Trim les dice que los suelten. Exige ClearState
+        // + Flush antes —ya estaban aquí, del arreglo de la fuga de
+        // swapchains— y recomienda llamarlo solo al quedar en reposo, que es
+        // exactamente este punto: los cues acaban de desaparecer de pantalla.
+        // Coste: un pequeño repunte al reconstruir en el siguiente cue.
+        if (auto dxgi3 = gfx.d3d.try_as<IDXGIDevice3>())
+            dxgi3->Trim();
     }
 
     if (had) {
@@ -527,7 +551,11 @@ void RenderAllULW() {
     if (!c.active) return;
     const int t = static_cast<int>(ElapsedMs());
     if (t >= kTotalMs) {
-        VisualCue::Term();
+        // Camino de respaldo ULW: aquí NO hay pila D3D/DComp que soltar
+        // (existe justamente porque no se pudo crear). Solo las regiones.
+        // Llamar a Term() reiniciaría `gfx.tried` y haría reintentar la
+        // creación en cada cue.
+        DestroyRegions();
         return;
     }
     PaintRegions(t);
@@ -558,7 +586,15 @@ LRESULT CALLBACK CueProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_NCHITTEST:
             return HTTRANSPARENT;   // click-through garantizado
         default:
-            if (msg == kMsgAnimDone) { VisualCue::Term(); return 0; }
+            if (msg == kMsgAnimDone) {
+                // Las regiones (ventanas, swapchains, DIBs) se sueltan ya.
+                // La PILA GRÁFICA no: reconstruirla cuesta 31 MB y un
+                // parpadeo, y encadenar mute/unmute es lo normal. Se agenda
+                // y solo se suelta si en 5 s no llegó otro cue.
+                DestroyRegions();
+                ScheduleGfxRelease();
+                return 0;
+            }
             break;
     }
     return DefWindowProcW(hwnd, msg, wParam, lParam);
@@ -591,6 +627,10 @@ bool AddRegion(RECT rc, RegionKind kind, bool useDComp) {
                              nullptr, nullptr, GetModuleHandleW(nullptr),
                              nullptr);
     if (!r.hwnd) return false;
+    // Primera región de la tanda: marca desde dónde se cuentan las
+    // swapchains y los DIB. `regionCount` es 0 justo antes de añadirla.
+    if (c.regionCount == 0)
+        mutemic::Telemetry::Memory("PERF", "subsystem", "cue.regions.before");
 
     // Buffer persistente para toda la animación (fuente del artwork).
     BITMAPINFO bi{};
@@ -663,6 +703,57 @@ bool AddRegion(RECT rc, RegionKind kind, bool useDComp) {
     return true;
 }
 
+// ── Soltado de la pila gráfica de los cues ──
+//
+// MEDIDO: montarla cuesta 31,2 MB de private bytes (sonda `cue.gfx`). El
+// daemon la construía en el primer cue y no la soltaba nunca, así que un
+// atajo pulsado una vez dejaba 31 MB residentes el resto del día.
+//
+// Diferencia con el flyout: aquí hay un HILO DE RENDER propio, cadenciado
+// con DwmFlush. Hay que pararlo ANTES de tocar el dispositivo, o se estaría
+// destruyendo por debajo de un hilo que sigue dibujando. StopThread() ya
+// hace flag + join, así que basta con llamarlo primero y en ese orden.
+void ReleaseGfx(const char* reason) {
+    if (!gfx.tried) return;
+
+    StopThread();          // primero: nadie más dibujando
+    DestroyRegions();      // ventanas, swapchains y DIBs
+
+    if (gfx.d3d) {
+        winrt::com_ptr<ID3D11DeviceContext> ctx;
+        gfx.d3d->GetImmediateContext(ctx.put());
+        if (ctx) { ctx->ClearState(); ctx->Flush(); }
+        if (auto dxgi3 = gfx.d3d.try_as<IDXGIDevice3>()) dxgi3->Trim();
+    }
+
+    gfx.d2dCtx = nullptr;
+    gfx.d2dDev = nullptr;
+    gfx.d2dFactory = nullptr;
+    gfx.dcomp = nullptr;
+    gfx.factory = nullptr;
+    gfx.dxgi = nullptr;
+    gfx.d3d = nullptr;
+    // `tried` vuelve a false para que InitGfx reconstruya en el próximo cue.
+    gfx.tried = false;
+    gfx.ok = false;
+
+    mutemic::Telemetry::Memory("PERF", "subsystem", "cue.gfx.released");
+    mutemic::Telemetry::Event("CUE", "gfx.release", reason);
+}
+
+void CALLBACK GfxCooldownProc(HWND, UINT, UINT_PTR id, DWORD) {
+    KillTimer(nullptr, id);
+    g_gfxCoolTimer = 0;
+    // Un cue nuevo empezó durante el enfriamiento: no soltar nada.
+    if (c.active) return;
+    ReleaseGfx("cooldown");
+}
+
+void ScheduleGfxRelease() {
+    if (g_gfxCoolTimer) KillTimer(nullptr, g_gfxCoolTimer);
+    g_gfxCoolTimer = SetTimer(nullptr, 0, kGfxCooldownMs, GfxCooldownProc);
+}
+
 }  // namespace
 
 void VisualCue::Show(bool muted, UINT style, UINT edge,
@@ -671,7 +762,22 @@ void VisualCue::Show(bool muted, UINT style, UINT edge,
     IconRenderer::Startup();
 
     // Cue en curso: reiniciar limpio (regiones distintas por estilo).
-    Term();
+    //
+    // DestroyRegions, NO Term(). Term() suelta también el dispositivo D3D11
+    // —32 MB medidos— y aquí lo vamos a usar en la línea siguiente. Encadenar
+    // dos atajos en medio segundo provocaba soltar y reconstruir el
+    // dispositivo en el MISMO milisegundo:
+    //
+    //   197050  wm_hotkey.recv
+    //   197076  gfx.release term      <- suelta 32 MB
+    //   197076  cue.gfx.before        <- y los reconstruye
+    //   197099  cue.d3d11  +31.6 MB
+    //
+    // Causa raíz: se le cambió el significado a Term() (de "destruir
+    // regiones" a "soltar todo") sin auditar a sus llamadores.
+    DestroyRegions();
+    // Se está usando: cancelar un enfriamiento pendiente.
+    if (g_gfxCoolTimer) { KillTimer(nullptr, g_gfxCoolTimer); g_gfxCoolTimer = 0; }
 
     const bool useDComp = InitGfx();
 
@@ -782,7 +888,8 @@ void VisualCue::Show(bool muted, UINT style, UINT edge,
 }
 
 void VisualCue::Term() {
-    DestroyRegions();
+    if (g_gfxCoolTimer) { KillTimer(nullptr, g_gfxCoolTimer); g_gfxCoolTimer = 0; }
+    ReleaseGfx("term");
 }
 
 }  // namespace mutemic

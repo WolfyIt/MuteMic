@@ -111,7 +111,14 @@ struct State {
     // mouse es la vía fiable (misma lección que el flyout anterior).
     HHOOK mouseHook = nullptr;
 };
+
 State g;
+
+// Soltado de la pila gráfica en reposo: se usa desde el WndProc (más abajo)
+// y se define después, junto al resto de la gestión de gráficos.
+constexpr UINT_PTR kGfxCooldownTimer = 1;
+constexpr UINT kGfxCooldownMs = 3000;
+void ReleaseGraphics(const char* reason);
 
 float Sc(float dip) { return dip * g.scale; }
 
@@ -181,6 +188,7 @@ float LayoutRows() {
 // ── Gráficos ──
 bool EnsureGraphics(int pxW, int pxH) {
     if (!g.gfxReady) {
+        Telemetry::Memory("PERF", "subsystem", "flyout.gfx.before");
         HRESULT hr = D3D11CreateDevice(
             nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
             D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0, D3D11_SDK_VERSION,
@@ -211,6 +219,7 @@ bool EnsureGraphics(int pxW, int pxH) {
                                             g.dcomp.put_void())))
             return false;
         g.gfxReady = true;
+        Telemetry::Memory("PERF", "subsystem", "flyout.gfx.after");
     }
 
     // Formatos de texto: se recrean si cambia el DPI (el tamaño va en px).
@@ -458,6 +467,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (LOWORD(wParam) == WA_INACTIVE) NativeFlyout::Hide();
             return 0;
 
+        case WM_TIMER:
+            if (wParam == kGfxCooldownTimer) {
+                KillTimer(hwnd, kGfxCooldownTimer);
+                // Reabrieron el menú mientras corría el enfriamiento: no
+                // soltar nada, se está usando.
+                if (!g.open) ReleaseGraphics("cooldown");
+                return 0;
+            }
+            break;
+
         default:
             // Cierre diferido pedido por el hook de mouse: aquí ya estamos
             // fuera de la cola de entrada del sistema y es seguro tocar
@@ -466,6 +485,49 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             break;
     }
     return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+// ── Soltado de la pila gráfica en reposo ──
+//
+// MEDIDO: montar los gráficos del flyout cuesta 45,9 MB de private bytes
+// (6,1 -> 52,0 en la sonda `flyout.gfx`). Abrir el menú del tray UNA vez
+// dejaba esos 46 MB residentes para siempre en un proceso que vive todo el
+// día, porque solo `Term()` liberaba, y `Term()` corre al cerrar la app.
+//
+// El patrón es el "modo caliente" que el Liquid Glass ya usa: mantener vivo
+// un rato por si vuelve a hacer falta —abrir el menú dos veces seguidas es
+// normal— y soltar cuando queda claro que no. La VENTANA se conserva: cuesta
+// nada y evita recrear la clase y el subclassing.
+void ReleaseGraphics(const char* reason) {
+    if (!g.gfxReady) return;
+
+    // Mismo orden que exige la doc de IDXGIDevice3::Trim: limpiar el pipeline
+    // y vaciar ANTES de soltar, para que D3D no retenga referencias a lo que
+    // estamos destruyendo. Sin esto la destrucción es diferida y la memoria
+    // no vuelve en el momento.
+    if (g.d3d) {
+        winrt::com_ptr<ID3D11DeviceContext> ctx;
+        g.d3d->GetImmediateContext(ctx.put());
+        if (ctx) { ctx->ClearState(); ctx->Flush(); }
+        if (auto dxgi3 = g.d3d.try_as<IDXGIDevice3>()) dxgi3->Trim();
+    }
+
+    g.fmtIcon = nullptr;
+    g.fmtSub = nullptr;
+    g.fmtText = nullptr;
+    g.dwrite = nullptr;
+    g.d2d = nullptr;
+    g.d2dDevice = nullptr;
+    g.d2dFactory = nullptr;
+    g.dcVisual = nullptr;
+    g.dcTarget = nullptr;
+    g.dcomp = nullptr;
+    g.swap = nullptr;
+    g.d3d = nullptr;
+    g.gfxReady = false;
+
+    Telemetry::Memory("PERF", "subsystem", "flyout.gfx.released");
+    Telemetry::Event("FLYOUT", "gfx.release", reason);
 }
 
 bool EnsureWindow() {
@@ -545,6 +607,8 @@ void NativeFlyout::Show(int anchorX, int anchorY, Model const& model,
     if (!g.mouseHook)
         g.mouseHook = SetWindowsHookExW(WH_MOUSE_LL, MouseProc,
                                         GetModuleHandleW(nullptr), 0);
+    if (g.hwnd) KillTimer(g.hwnd, kGfxCooldownTimer);   // se está usando
+    Probes::Hit(Probe::FlyoutShow);
     Telemetry::Event("FLYOUT", "show");
 }
 
@@ -559,7 +623,11 @@ void NativeFlyout::Hide() {
     if (!g.open) return;
     g.open = false;
     if (g.mouseHook) { UnhookWindowsHookEx(g.mouseHook); g.mouseHook = nullptr; }
-    if (g.hwnd) ShowWindow(g.hwnd, SW_HIDE);
+    if (g.hwnd) {
+        ShowWindow(g.hwnd, SW_HIDE);
+        // Enfriamiento: si el menú no se reabre en 3 s, se sueltan los 46 MB.
+        SetTimer(g.hwnd, kGfxCooldownTimer, kGfxCooldownMs, nullptr);
+    }
     Telemetry::Event("FLYOUT", "hide");
 }
 
@@ -567,19 +635,12 @@ bool NativeFlyout::IsOpen() { return g.open; }
 
 void NativeFlyout::Term() {
     Hide();
-    g.dcVisual = nullptr;
-    g.dcTarget = nullptr;
-    g.swap = nullptr;
-    g.d2d = nullptr;
-    g.d2dDevice = nullptr;
-    g.d2dFactory = nullptr;
-    g.dwrite = nullptr;
-    g.fmtText = nullptr;
-    g.fmtSub = nullptr;
-    g.fmtIcon = nullptr;
-    g.dcomp = nullptr;
-    g.d3d = nullptr;
-    g.gfxReady = false;
+    // Una sola lista de recursos, en ReleaseGraphics. Antes esta función
+    // tenía su propia copia: dos listas del mismo conjunto, garantizadas para
+    // divergir en cuanto alguien añada un recurso y actualice solo una. Es el
+    // mismo error de fondo que el mensaje con dos significados y los ajustes
+    // con dos copias en memoria.
+    ReleaseGraphics("term");
     if (g.hwnd) { DestroyWindow(g.hwnd); g.hwnd = nullptr; }
 }
 

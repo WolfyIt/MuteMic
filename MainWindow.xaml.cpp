@@ -117,12 +117,17 @@ namespace winrt::MuteMic::implementation
         AppWindow().Closing([](winrt::Microsoft::UI::Windowing::AppWindow const&,
                                winrt::Microsoft::UI::Windowing::AppWindowClosingEventArgs const&)
         {
+            // Se instrumenta porque hay evidencia de que la ✕ NO llega aquí:
+            // tras "cerrar", el log muestra los trims de OnWindowHidden y
+            // ningún shutdown. Si esta línea no aparece nunca, el cierre real
+            // pasa por el camino de visibilidad y este handler es decorativo.
+            mutemic::Telemetry::Event("APP", "window.closing", "AppWindow Closing fired");
             MuteMicCore::Get().RequestExit();
         });
 
         // El backdrop de refracción muestrea lo que hay DETRÁS de la ventana.
-        AppWindow().Changed([](winrt::Microsoft::UI::Windowing::AppWindow const& sender,
-                               winrt::Microsoft::UI::Windowing::AppWindowChangedEventArgs const& e)
+        AppWindow().Changed([this](winrt::Microsoft::UI::Windowing::AppWindow const& sender,
+                                   winrt::Microsoft::UI::Windowing::AppWindowChangedEventArgs const& e)
         {
             if (MuteMicCore::Exiting()) return;
             if (e.DidPositionChange() || e.DidSizeChange())
@@ -131,6 +136,14 @@ namespace winrt::MuteMic::implementation
             {
                 const bool visible = sender.IsVisible();
                 mutemic::LiquidGlassBackdrop::OnWindowVisibility(visible);
+                // El hook de render se QUITA al ocultar, no se deja con un
+                // return temprano. Un return es barato, pero 165 veces por
+                // segundo para siempre no lo es: con la ventana escondida
+                // el proceso seguía despertando a la frecuencia del monitor
+                // sin dibujar nada. Se detectó por el latido `render.beat`,
+                // que siguió apareciendo con la ventana invisible.
+                if (visible) InstallRenderHook();
+                else         m_renderHook.revoke();
                 // Al tray: devolver al SO lo que costó mostrar la UI. Sin
                 // esto la app se queda residente en 120-200 MB para siempre.
                 if (visible) MuteMicCore::Get().OnWindowShown();
@@ -175,7 +188,19 @@ namespace winrt::MuteMic::implementation
             throw;
         }
 
-        // Medidor por frame (v-sync): pico directo del endpoint.
+        InstallRenderHook();
+        Telemetry::Event("UI", "mainwindow.ctor", "stage=done render_hook=installed");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Chrome / backdrop
+
+
+    // Instalación del hook de render por frame. Extraído del constructor
+    // porque ahora también se reinstala al volver de la bandeja: al ocultar
+    // se REVOCA (ver AppWindow().Changed) en vez de dejarlo disparando.
+    void MainWindow::InstallRenderHook()
+    {
         m_renderHook = winrt::Microsoft::UI::Xaml::Media::CompositionTarget::Rendering(
             winrt::auto_revoke, [this](auto&&, auto&&)
         {
@@ -194,6 +219,7 @@ namespace winrt::MuteMic::implementation
             // está atascado y el hueco dice exactamente cuándo.
             {
                 using mutemic::Telemetry;
+                mutemic::Probes::Hit(mutemic::Probe::RenderFrame);
                 static ULONGLONG s_prev = 0;
                 static ULONGLONG s_windowStart = 0;
                 static uint32_t s_frames = 0;
@@ -234,11 +260,7 @@ namespace winrt::MuteMic::implementation
             UpdateLevelBar();
         });
 
-        Telemetry::Event("UI", "mainwindow.ctor", "stage=done render_hook=installed");
     }
-
-    // ─────────────────────────────────────────────────────────────────────
-    // Chrome / backdrop
 
     // MEDIDO, no supuesto: esta función tarda ~1 s cuando el daemon está
     // corriendo y ~156 ms cuando no. Un segundo de ventana muerta al abrir es
@@ -714,10 +736,12 @@ namespace winrt::MuteMic::implementation
     {
         auto& core = MuteMicCore::Get();
 
-        double raw = core.ServicePaused() ? 0.0 : core.PollPeak();
-        if (raw < 0.0) raw = 0.0;
-        if (raw > 1.0) raw = 1.0;
-        const double target = std::sqrt(raw);
+        // Misma curva y misma puerta que decide el ícono del tray: si uno
+        // reacciona, el otro también. Antes esto era sqrt() por su cuenta —
+        // media corrección perceptual — y por eso con voz normal la barra
+        // apenas se despegaba del borde.
+        const float raw = core.ServicePaused() ? 0.0f : core.PollPeak();
+        const double target = mutemic::MeterDisplay(raw);
 
         if (target > m_displayLevel) m_displayLevel = target;
         else m_displayLevel += (target - m_displayLevel) * 0.22;

@@ -142,6 +142,8 @@ private:
     std::unique_ptr<TrayIcon> tray_;
     HWND hwnd_ = nullptr;
     HANDLE singleInstanceMutex_ = nullptr;
+    // Solo en Mode::SettingsUi: señala "hay ventana viva" a cualquier daemon.
+    HANDLE settingsUiMutex_ = nullptr;
     // Proceso de ajustes en curso (solo en modo daemon).
     HANDLE settingsProcess_ = nullptr;
     bool settingsUiRunning_ = false;
@@ -198,6 +200,8 @@ private:
     // "Suena este cue": lo emite el proceso de ajustes, lo atiende el daemon.
     // Mantiene UNA sola sesión de audio en el mezclador. Ver PlayCue.
     UINT playCueMsg_ = 0;
+    // "El daemon se cierra": lo emite el daemon, lo atiende la ventana.
+    UINT quitMsg_ = 0;
     UINT cmdMsg_ = 0;            // CLI: MuteMic.Cmd
     static inline std::atomic<bool> exiting_{ false };
 };

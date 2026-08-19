@@ -21,26 +21,71 @@ namespace {
 
 constexpr wchar_t kWindowClass[] = L"MuteMicCoreWindow";
 constexpr wchar_t kMutexName[] = L"Local\\MuteMic_SingleInstance";
+// Mutex PROPIO del proceso de ajustes. Existe para que CUALQUIER daemon
+// —incluido uno recién arrancado— pueda saber si ya hay una ventana viva
+// sin depender de su propio `settingsUiRunning_`, que se pierde al reiniciar.
+// Sin esto: se hace Quit en el tray, el proceso de ajustes sobrevive, se
+// reabre la app y al pedir ajustes salen DOS ventanas — la del huérfano que
+// responde al broadcast, y una nueva que el daemon crea porque no sabe que
+// el huérfano existe.
+constexpr wchar_t kSettingsUiMutex[] = L"Local\\MuteMic_SettingsUI";
 constexpr UINT_PTR kMeterTimerId = 1;
 constexpr UINT_PTR kHoldReleaseTimerId = 3;
 constexpr UINT_PTR kPadTimerId = 4;
 constexpr UINT_PTR kTrimTimerId = 5;   // recorte de memoria al ir al tray
 constexpr UINT_PTR kUiWatchTimerId = 6;  // vigila el proceso de ajustes
+constexpr UINT_PTR kHideExitTimerId = 7; // ventana oculta -> terminar proceso
+constexpr UINT_PTR kCuePlayerTimerId = 8; // soltar el MediaPlayer en reposo
+
+// El MediaPlayer del cue de sonido era el ÚNICO de los cinco subsistemas sin
+// enfriamiento. Medido: crearlo cuesta 0,6 MB, pero reproducir arrastra el
+// pipeline de Media Foundation, y eso no volvía nunca. Es el residuo que
+// dejaba al daemon en ~9 MB en vez de volver a ~6 tras un cue.
+// 10 s: más que el enfriamiento de los gráficos, porque encadenar
+// mute/unmute es normal y recrear el reproductor tiene latencia audible.
+constexpr UINT kCuePlayerIdleMs = 10000;
+
+// Gracia antes de matar el proceso de UI cuando la ventana se oculta.
+// MEDIDO: reabrir la ventana cuesta 374 ms; mantenerla "caliente" cuesta
+// ~172 MB de private bytes residentes. No compensa. 15 s cubren el caso de
+// minimizar y restaurar enseguida sin pagar el resto del día.
+constexpr UINT kHideExitMs = 15000;
 
 // Definida más abajo (junto al resto de helpers); se usa en HandleMessage.
 void TrimWorkingSet(const char* reason);
-constexpr UINT kMeterIntervalMs = 33;
+
+// Red de seguridad de salida del proceso de ajustes. Ver RequestExit.
+void CALLBACK ForcedExitProc(HWND, UINT, UINT_PTR id, DWORD) {
+    KillTimer(nullptr, id);
+    Telemetry::Event("APP", "exit.forced",
+                     "Application::Exit did not end the message loop");
+    Telemetry::Shutdown("settings-forced");
+    ExitProcess(0);
+}
+// Frecuencia del medidor que alimenta el ÍCONO DEL TRAY (16x16 px) y la
+// sincronización de estado. NO es el medidor de la ventana: ese va por el
+// hook de render, aparte.
+//
+// Estaba en 33 ms = 30 despertares por segundo, veinticuatro horas al día,
+// para decidir el color de un ícono diminuto cuyo umbral de "hay voz" es
+// binario. A 250 ms son 4, y visualmente no se distingue. Es el cambio de
+// mayor relación beneficio/riesgo del proyecto: una constante.
+//
+// Provisional: cuando entre IAudioEndpointVolumeCallback, el ESTADO pasa a
+// ser por evento y este timer solo tendrá que cubrir el nivel de voz.
+constexpr UINT kMeterIntervalMs = 250;
 constexpr UINT kPadIntervalMs = 30;
 // Debounce del "soltar" en modos hold: las teclas macro (NZXT, Synapse F14)
 // no mantienen el key-down — repiten pares down+up.
 constexpr UINT kHoldReleaseMs = 170;
-constexpr float kActiveThreshold = 0.04f;
+// El umbral vive ahora en AudioController.h (kMeterActive), en la escala
+// perceptual y compartido con la barra de la ventana.
 // RegisterHotKey por card: id = base + índice.
 constexpr int kRegisteredHotkeyBase = 100;
 
 TrayFace FaceFor(MicState state, float level, bool paused) {
     if (paused || state == MicState::NoDevice) return TrayFace::NoDevice;
-    const bool active = level > kActiveThreshold;
+    const bool active = MeterDisplay(level) > 0.0f;
     if (state == MicState::Muted)
         return active ? TrayFace::RedActive : TrayFace::RedIdle;
     return active ? TrayFace::GreenActive : TrayFace::GreenIdle;
@@ -82,6 +127,7 @@ bool MuteMicCore::Init(Mode mode) {
     bringToFrontMsg_ = RegisterWindowMessageW(L"MuteMic.BringSettingsToFront");
     settingsChangedMsg_ = RegisterWindowMessageW(L"MuteMic.SettingsChanged");
     playCueMsg_ = RegisterWindowMessageW(L"MuteMic.PlayCue");
+    quitMsg_ = RegisterWindowMessageW(L"MuteMic.Quit");
     cmdMsg_ = RegisterWindowMessageW(L"MuteMic.Cmd");
 
     IconRenderer::Startup();
@@ -132,6 +178,9 @@ bool MuteMicCore::Init(Mode mode) {
         // hook temporal de BeginCapture postearía a nullptr y la captura no
         // terminaría nunca.
         HotkeyHook::SetTarget(hwnd_);
+        // Señal de "hay una ventana de ajustes viva" legible por cualquier
+        // daemon. Se libera sola al morir el proceso.
+        settingsUiMutex_ = CreateMutexW(nullptr, TRUE, kSettingsUiMutex);
     }
 
     if (mode == Mode::Daemon) {
@@ -194,6 +243,15 @@ bool MuteMicCore::LaunchSettingsProcess() {
     // en vez de abrir otra. Este mensaje SOLO lo atiende un proceso de UI.
     PostMessageW(HWND_BROADCAST, bringToFrontMsg_, 0, 0);
     if (settingsUiRunning_) return true;
+    // Puede haber una ventana viva que ESTE daemon no lanzó (quedó huérfana
+    // de una instancia anterior). El broadcast de arriba ya la trae al
+    // frente; crear otra encima es lo que producía dos ventanas.
+    if (HANDLE existing = OpenMutexW(SYNCHRONIZE, FALSE, kSettingsUiMutex)) {
+        CloseHandle(existing);
+        Telemetry::Event("APP", "settings.launch",
+                         "ok=1 reused an existing settings window");
+        return true;
+    }
 
     wchar_t exe[MAX_PATH] = {};
     GetModuleFileNameW(nullptr, exe, MAX_PATH);
@@ -241,6 +299,12 @@ void MuteMicCore::Term() {
         hwnd_ = nullptr;
     }
     IconRenderer::Shutdown();
+    if (settingsUiMutex_) {
+        // Soltarlo explícitamente: mientras exista, cualquier daemon cree
+        // que hay una ventana viva y se niega a abrir una nueva.
+        CloseHandle(settingsUiMutex_);
+        settingsUiMutex_ = nullptr;
+    }
     if (singleInstanceMutex_) {
         CloseHandle(singleInstanceMutex_);
         singleInstanceMutex_ = nullptr;
@@ -478,8 +542,33 @@ LRESULT MuteMicCore::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
                     UpdateMeterTimer();
                     Telemetry::Event("APP", "settings.closed", "settings reloaded");
                 }
+            } else if (wParam == kCuePlayerTimerId) {
+                KillTimer(hwnd, kCuePlayerTimerId);
+                if (cueSource_) {
+                    try { cueSource_.Close(); } catch (...) {}
+                    cueSource_ = nullptr;
+                    cueSourceFile_.clear();
+                }
+                if (player_) {
+                    try { player_.Close(); } catch (...) {}
+                    player_ = nullptr;
+                    Telemetry::Memory("PERF", "subsystem", "mediaplayer.released");
+                }
+                // Y de paso devolver el working set: el daemon no lo recorta
+                // nunca (el timer de trim solo se arma al ocultar la ventana,
+                // que en el daemon no ocurre). Sin esto la memoria baja a
+                // saltos y a destiempo, cuando Windows decide.
+                TrimWorkingSet("cue-idle");
+            } else if (wParam == kHideExitTimerId) {
+                KillTimer(hwnd, kHideExitTimerId);
+                Telemetry::Event("APP", "hidden.exit",
+                                 "settings window hidden past grace; releasing process");
+                RequestExit();
             } else if (wParam == kTrimTimerId) {
                 TrimWorkingSet("tray-idle");
+                // Foto del árbol de sondas. Se engancha a un timer que YA
+                // existía: observarse no debe costar un despertar propio.
+                Probes::Snapshot("tray-idle");
                 // Re-armar a intervalo largo mientras siga oculta. Barato
                 // (una llamada cada 45 s) y mantiene la app en su mínimo en
                 // vez de dejarla subir sola.
@@ -633,6 +722,16 @@ LRESULT MuteMicCore::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
                 RefreshTray();
                 return 0;
             }
+            // El daemon se está cerrando: la ventana de ajustes también.
+            // Solo lo atiende un proceso de UI, y se ignora el propio.
+            if (quitMsg_ != 0 && msg == quitMsg_) {
+                if (mode_ == Mode::SettingsUi &&
+                    wParam != static_cast<WPARAM>(GetCurrentProcessId())) {
+                    Telemetry::Event("APP", "quit.follow", "daemon is exiting");
+                    RequestExit();
+                }
+                return 0;
+            }
             // El proceso de ajustes pide que suene un cue. SOLO lo atiende
             // el daemon: así la única sesión de audio del mezclador es la
             // suya. wParam = pid del emisor, lParam = 1 si es cue de mute.
@@ -760,6 +859,13 @@ void MuteMicCore::RequestExit() {
     bool expected = false;
     if (!exiting_.compare_exchange_strong(expected, true)) return;
 
+    // El daemon se lleva consigo al proceso de ajustes. Antes no: hacer Quit
+    // en el tray dejaba la ventana viva (aunque oculta), y esa huérfana era
+    // la que después producía dos ventanas al reabrir.
+    if (IsDaemon() && quitMsg_ != 0)
+        PostMessageW(HWND_BROADCAST, quitMsg_,
+                     static_cast<WPARAM>(GetCurrentProcessId()), 0);
+
     auto doExit = [] {
         auto& self = Get();
         // Orden: primero lo que dibuja/captura (glass, cues), luego hooks,
@@ -773,6 +879,21 @@ void MuteMicCore::RequestExit() {
             PostQuitMessage(0);
         } else {
             winrt::Microsoft::UI::Xaml::Application::Current().Exit();
+
+            // RED DE SEGURIDAD. `Application::Exit()` asume el bucle de
+            // mensajes que instala el WinMain generado por XAML; aquí el
+            // WinMain es MANUAL (DISABLE_XAML_GENERATED_MAIN) y no siempre
+            // lo rompe. Medido: la ventana se destruía, el hook de render se
+            // revocaba, y el proceso seguía vivo indefinidamente con ~79 MB
+            // comprometidos, su timer del medidor corriendo y una ráfaga de
+            // disco cada 45 s. Nunca se escribía `APP shutdown` — esa
+            // ausencia fue la pista.
+            //
+            // El proceso de ajustes es EFÍMERO por diseño: si medio segundo
+            // después seguimos aquí, se termina y punto. El timer con hwnd
+            // nulo se despacha por el bucle de este hilo, que precisamente
+            // es el que sigue vivo.
+            SetTimer(nullptr, 0, 500, ForcedExitProc);
         }
     };
 
@@ -835,6 +956,20 @@ void MuteMicCore::OnWindowHidden() {
     // exactamente el "se va acumulando" reportado. Se re-arma solo mientras
     // la ventana siga oculta.
     SetTimer(hwnd_, kTrimTimerId, 900, nullptr);
+
+    // OCULTAR TIENE QUE TERMINAR EL PROCESO.
+    //
+    // Medido: la ✕ de esta ventana NO dispara AppWindow().Closing — oculta.
+    // Por eso RequestExit() nunca corría y el proceso quedaba vivo
+    // indefinidamente con ~75 MB comprometidos, su timer del medidor
+    // andando y una ráfaga de disco cada 45 s. Minimizar hacía lo mismo.
+    //
+    // Este timer es la única vía que cubre AMBOS casos, porque los dos
+    // terminan en un cambio de visibilidad. Reabrir cancela la salida.
+    if (mode_ == Mode::SettingsUi) {
+        SetTimer(hwnd_, kHideExitTimerId, kHideExitMs, nullptr);
+        Telemetry::Event("APP", "window.hidden", "exit grace armed");
+    }
 }
 
 bool MuteMicCore::ShowNativeFlyout(int x, int y) {
@@ -878,7 +1013,11 @@ bool MuteMicCore::ShowNativeFlyout(int x, int y) {
 }
 
 void MuteMicCore::OnWindowShown() {
-    if (hwnd_) KillTimer(hwnd_, kTrimTimerId);
+    if (!hwnd_) return;
+    KillTimer(hwnd_, kTrimTimerId);
+    KillTimer(hwnd_, kHideExitTimerId);   // volvió a la vista: no salir
+    if (mode_ == Mode::SettingsUi)
+        Telemetry::Event("APP", "window.shown", "exit grace cancelled");
 }
 
 namespace {
@@ -1109,6 +1248,9 @@ std::wstring MuteMicCore::PadButtonName(UINT bit) {
 // lanzó --settings suelto), se reproduce local, porque entonces no hay
 // duplicado posible.
 void MuteMicCore::PlayCue(bool muteCue) {
+    Probes::Hit(Probe::CuePlay);
+    // Rearmar el enfriamiento del reproductor en cada cue.
+    if (hwnd_) SetTimer(hwnd_, kCuePlayerTimerId, kCuePlayerIdleMs, nullptr);
     if (mode_ == Mode::SettingsUi && playCueMsg_ != 0) {
         if (HANDLE daemon = OpenMutexW(SYNCHRONIZE, FALSE, kMutexName)) {
             CloseHandle(daemon);
@@ -1136,6 +1278,7 @@ void MuteMicCore::PlayCue(bool muteCue) {
 
     try {
         if (!player_) {
+            Telemetry::Memory("PERF", "subsystem", "mediaplayer.before");
             player_ = winrt::Windows::Media::Playback::MediaPlayer();
             // Cero integración con el sistema de medios (sin SMTC, categoría
             // SoundEffects): sin overlays ni "doorbell" por cada cue.
@@ -1144,6 +1287,7 @@ void MuteMicCore::PlayCue(bool muteCue) {
                 player_.AudioCategory(
                     winrt::Windows::Media::Playback::MediaPlayerAudioCategory::SoundEffects);
             } catch (...) {}
+            Telemetry::Memory("PERF", "subsystem", "mediaplayer.after");
         }
         player_.Volume(settings_.soundVolume / 100.0);
 
@@ -1236,6 +1380,7 @@ void MuteMicCore::RestoreOriginalState() {
 // nosotros — ignorar el propio mensaje es lo que evita repetir el bucle de
 // broadcast que costó la sesión anterior.
 void MuteMicCore::SaveSettings() {
+    Probes::Hit(Probe::SettingsSave);
     SettingsStore::Save(settings_);
     if (settingsChangedMsg_ != 0)
         PostMessageW(HWND_BROADCAST, settingsChangedMsg_,
@@ -1245,6 +1390,7 @@ void MuteMicCore::SaveSettings() {
 // Relee del disco y re-aplica todo lo que depende de la configuración.
 // Barato: solo corre cuando el OTRO proceso guardó de verdad.
 void MuteMicCore::ReloadSettings() {
+    Probes::Hit(Probe::SettingsReload);
     settings_ = SettingsStore::Load();
     audio_.SetDeviceId(settings_.deviceId);
     ApplyBindings();
@@ -1272,6 +1418,7 @@ MicState MuteMicCore::State() { return audio_.GetState(); }
 // que deja inutilizable el escritorio entero. Ya pasó dos veces. Bajar el
 // ritmo elimina el amplificador aunque el fallo de fondo reaparezca.
 float MuteMicCore::PollPeak() {
+    Probes::Hit(Probe::LevelBarUpdate);
     constexpr ULONGLONG kMinIntervalMs = 16;   // ~60 Hz techo
     const ULONGLONG now = GetTickCount64();
     if (now - lastPeakPoll_ < kMinIntervalMs)

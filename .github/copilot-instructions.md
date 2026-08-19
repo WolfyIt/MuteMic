@@ -65,6 +65,12 @@ Include dirs (order matters): `$(ProjectDir)` → `$(IntDir)` → `$(IntDir)Gene
   cache. Fix: `msbuild MuteMic.sln /t:Restore /p:Platform=x64` and rebuild.
   Rule of thumb: **after any deep clean, always `/t:Restore` before the
   build.**
+- **`LNK1168: cannot open MuteMic.exe for writing`** → a MuteMic process is
+  still running and holding the binary. The daemon is resident by design, so
+  this happens on most rebuilds. Not a code error. Fix: kill it first, and make
+  it part of the build step rather than a reaction:
+  `Stop-Process -Name "MuteMic" -Force -ErrorAction SilentlyContinue` before
+  invoking msbuild.
 - **`Windows App Runtime not found` at launch** → `winget install Microsoft.WindowsAppRuntime.1.6` (it is framework-dependent).
 - **Mojibake in strings (Ã³, â€")** → `/utf-8` is missing from the compiler options. It is in `AdditionalOptions`; do not remove it.
 
@@ -203,6 +209,30 @@ msbuild MuteMic.sln /p:Configuration=Debug /p:Platform=x64 /m 2>&1 |
 
 If the result is zero `: warning ` lines, say so explicitly ("zero warnings,
 verified with the correct filter"). **Never "0 errors" on its own.**
+
+### Verify the build actually rebuilt (do this every time)
+
+A "Build succeeded, 0 errors" does **not** mean the code changed. On 13 Aug
+2026 several fixes were debugged against binaries that never contained them:
+Claude's edits were not updating the files' modification times, so msbuild
+correctly skipped them as up to date.
+
+**One-second check:** compare the exe's timestamp against the newest modified
+source. If the exe did not change date after a successful build, nothing was
+compiled.
+
+```powershell
+Get-Item "x64\Debug\MuteMic.exe" | Select-Object LastWriteTime
+git diff --name-only | ForEach-Object { Get-Item $_ | Select-Object Name, LastWriteTime }
+```
+
+The telemetry header carries the same check: `exe_linked` must move. Ignore
+`compiled=` — it is the compile time of `Telemetry.cpp`, which rarely changes,
+so it goes stale on every incremental build.
+
+If sources look older than the objects, Claude touches them before handing
+over the build task. If a build task arrives and the exe does not move, say so
+instead of debugging the old binary.
 
 ### How to test a build (this matters more than it sounds)
 

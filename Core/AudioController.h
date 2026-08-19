@@ -1,5 +1,6 @@
 #pragma once
 #include <windows.h>
+#include <cmath>
 #include <string>
 #include <vector>
 
@@ -13,6 +14,46 @@ enum class MicState {
     Muted,
     NoDevice,
 };
+
+// ESCALA PERCEPTUAL DEL MEDIDOR — se resuelve UNA vez, aquí, porque la
+// consumen dos sitios (el ícono del tray y la barra de la ventana) y tenerla
+// duplicada garantizaba que se desincronizaran.
+//
+// PORQUÉ EXISTE: IAudioMeterInformation::GetPeakValue devuelve AMPLITUD
+// LINEAL 0..1, pero el oído es logarítmico. El umbral del tray estaba en
+// 0,04 lineal = -28 dBFS, y el habla de conversación pica entre -35 y -20
+// dBFS: el umbral caía justo por encima de la voz normal, así que había que
+// gritarle o golpear el micrófono. La barra usaba sqrt(), que es media
+// corrección y dejaba un segmento diminuto casi fijo.
+//
+// Se mapea [-60 dBFS, 0 dBFS] a [0, 1], que es lo que hace cualquier medidor
+// de audio real. Referencia: voz suave ~-40 dB -> 0,33; voz normal ~-20 dB
+// -> 0,67; grito ~-6 dB -> 0,9.
+inline float MeterNormalize(float linearPeak) {
+    constexpr float kFloorDb = -60.0f;
+    if (linearPeak <= 0.0f) return 0.0f;
+    const float db = 20.0f * std::log10(linearPeak);
+    if (db <= kFloorDb) return 0.0f;
+    return (db - kFloorDb) / -kFloorDb;
+}
+
+// Puerta de ruido: por debajo de esto es silencio. 0,25 normalizado =
+// -45 dBFS, justo encima del ruido de sala típico y por debajo del habla
+// suave.
+inline constexpr float kMeterGate = 0.25f;
+
+// Valor LISTO PARA MOSTRAR, 0..1. Aplica la puerta y reescala el resto al
+// rango completo, para que la barra no salte de golpe a un cuarto cuando
+// empieza la voz.
+//
+// Es la ÚNICA definición de "cuánto sonido hay": la usan la barra de la
+// ventana y la decisión de si el ícono del tray va "activo". Un solo número
+// y una sola regla — si el ícono se enciende, la barra se mueve, siempre.
+inline float MeterDisplay(float linearPeak) {
+    const float n = MeterNormalize(linearPeak);
+    if (n <= kMeterGate) return 0.0f;
+    return (n - kMeterGate) / (1.0f - kMeterGate);
+}
 
 struct CaptureDevice {
     std::wstring id;

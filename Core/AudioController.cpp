@@ -108,6 +108,7 @@ void AudioController::SetDeviceId(const std::wstring& id) {
 // cubría los fallos AL ADQUIRIR; este es el fallo AL USAR, que entraba por la
 // misma puerta sin pagar peaje.
 void AudioController::FailEndpoint() {
+    Probes::Hit(Probe::AudioFail);
     ReleaseEndpoint();
     retryAfter_ = GetTickCount64() + kRetryMs;
     // El backoff hace de limitador: como mucho una línea por segundo.
@@ -140,6 +141,7 @@ void AudioController::ReleaseEndpoint() {
 //  2. No había backoff. Sin dispositivo real, cada fallo reintentaba de
 //     inmediato. Ahora un fallo silencia los reintentos 1 s.
 bool AudioController::EnsureEndpoint() {
+    Probes::Hit(Probe::AudioEnsure);
     if (volume_) return true;
 
     const ULONGLONG now = GetTickCount64();
@@ -181,6 +183,7 @@ bool AudioController::EnsureEndpoint() {
         // Sin medidor igual podemos mutear; no es fatal.
     }
     currentName_ = FriendlyName(device.p);
+    Probes::Hit(Probe::AudioAcquire);   // adquisición REAL, no el corto
     return true;
 }
 
@@ -219,7 +222,9 @@ bool AudioController::SetMuted(bool muted) {
 }
 
 float AudioController::GetPeak() {
+    const auto t0 = Telemetry::Now();
     if (!EnsureEndpoint() || !meter_) return 0.0f;
+    Probes::HitTimed(Probe::AudioPeek, t0);
     float peak = 0.0f;
     if (FAILED(meter_->GetPeakValue(&peak))) {
         FailEndpoint();

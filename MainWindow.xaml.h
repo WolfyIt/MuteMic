@@ -45,6 +45,10 @@ namespace winrt::MuteMic::implementation
     private:
         void SetupBackdrop();
         void SetupWindowChrome();
+        // Hook de render por frame. Se instala al mostrar y se REVOCA al
+        // ocultar: dejarlo con un return temprano seguía despertando el
+        // proceso a la frecuencia del monitor con la ventana invisible.
+        void InstallRenderHook();
         void UpdateDragRegion();
         void PopulateDevices();
         void PopulateSounds();

@@ -939,10 +939,20 @@ void LiquidGlassBackdrop::OnWindowVisibility(bool visible) {
         // Al tray: liberar framepool (2 buffers del tamaño del monitor),
         // último frame y grafo — el costo del glass cae a ~0.
         StopCapture();
+        // …y QUITAR los hooks de eventos. StopCapture soltaba la memoria
+        // pero los dejaba puestos: son hooks GLOBALES que reciben eventos
+        // de TODAS las ventanas del sistema, así que con nuestra ventana
+        // oculta el proceso seguía despertando y registrando
+        // `recapture.request` indefinidamente. Medido: 0,3 % de CPU y
+        // escritura a disco continua en un proceso invisible.
+        RemoveEventHooks();
         Log("capture released (window hidden)");
-    } else if (!g.session) {
-        DoRecapture();
-        Log("capture rearmed (window shown)");
+    } else {
+        InstallEventHooks();          // idempotente: sale si ya están
+        if (!g.session) {
+            DoRecapture();
+            Log("capture rearmed (window shown)");
+        }
     }
 }
 
